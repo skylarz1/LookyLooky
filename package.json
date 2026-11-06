@@ -1,0 +1,15 @@
+{
+  "name": "lookylooky",
+  "version": "1.0.0",
+  "description": "LookyLooky - low-latency network camera relay (RTSP/HTTP cameras to browsers via WebCodecs, MJPEG and recordings)",
+  "main": "server/index.js",
+  "private": true,
+  "scripts": {
+    "start": "node server/index.js",
+    "test": "node test/e2e.js && node test/features.js"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

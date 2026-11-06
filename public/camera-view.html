@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<!--
+  LookyLooky view-only board (the Claudifer viewer), served at
+  /camera-view.html?layout=<id or name> (also /view). Streams connect to
+  /cameras/stream on this server, and a browser without WebCodecs gets a thumbnail-only board with a banner
+  instead of a black page.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LookyLooky - View</title>
+  <link rel="icon" type="image/svg+xml" href="/images/favicon.svg">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <script src="/js/compat.js"></script>
+  <script>LookyCompat.requireSecure('[LookyLooky.SecurePort]');</script>
+  <link rel="stylesheet" href="/styles/camera-viewer.css">
+  <style>
+    /*
+     * View-only board.  Nothing but camera panes: no header, no sidebar, no
+     * modals, no hover controls, no drag-and-drop.  The layout is fixed by the
+     * URL, so there is nothing here that can alter server state.
+     */
+    body { background: #000; }
+
+    #viewGrid {
+      flex: 1;
+      min-height: 0;
+      padding: 2px;
+      gap: 2px;
+    }
+
+    /* Full-bleed: square corners, but keep a visible seam — on a dark or
+       stopped stream, black-on-black borders make the panes indistinguishable. */
+    #viewGrid .camera-card {
+      border-radius: 0;
+      border-color: var(--border);
+    }
+
+    /* The dashboard reveals the camera name on mouse movement.  A wall display
+       has no pointer, so that would never fire — pin the overlay on instead.
+       Same styling the dashboard applies via .name-hover. */
+    #viewGrid .camera-card .name-overlay {
+      opacity: 1;
+      background: linear-gradient(transparent, rgba(0,0,0,0.75));
+      text-shadow: 0 1px 4px rgba(0,0,0,0.9), 0 0 8px rgba(0,0,0,0.6);
+    }
+
+    /* Hover controls are never built on this page, but a stale rule would
+       still reserve space / catch clicks.  Belt and braces. */
+    #viewGrid .hover-controls { display: none !important; }
+
+    .view-message {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      text-align: center;
+      background: #000;
+      z-index: 10;
+    }
+    .view-message .box { max-width: 620px; line-height: 1.6; }
+    .view-message h1 { font-size: 20px; margin-bottom: 10px; font-weight: 600; }
+    .view-message p  { font-size: 14px; color: var(--text-dim); margin-bottom: 8px; }
+    .view-message code {
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 1px 6px;
+      color: var(--text);
+    }
+    .view-message ul { list-style: none; margin-top: 12px; }
+    .view-message li { margin: 4px 0; }
+    .view-message a { color: var(--accent); text-decoration: none; }
+    .view-message a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <!-- CameraGrid reassigns this element's className on every setLayout(),
+       so the page's own styling hangs off the id, not a class. -->
+  <div id="viewGrid" class="grid"></div>
+
+  <script type="module">
+    import { CameraGrid } from '/js/camera/viewer.js';
+
+    const BASE = '';
+    const POLL_MS = 5000;
+
+    // LookyLooky serves the camera stream at /cameras/stream.
+    const STREAM_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/cameras/stream`;
+
+    async function fetchJSON(url) {
+      const res = await fetch(BASE + url);
+      if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => res.statusText)}`);
+      return res.json();
+    }
+
+    function message(title, bodyHTML) {
+      const el = document.createElement('div');
+      el.className = 'view-message';
+      el.innerHTML = `<div class="box"><h1>${title}</h1>${bodyHTML}</div>`;
+      document.body.appendChild(el);
+    }
+
+    const esc = v => String(v ?? '').replace(/[&<>"']/g,
+      c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+    // WebCodecs is unavailable outside a secure context (and in old browsers).
+    // Rather than render black, the board runs every pane as a JPEG thumbnail
+    // and a banner says how to get full motion.
+    function checkSecureContext() {
+      if (!LookyCompat.webcodecs) LookyCompat.insecureBanner('[LookyLooky.SecurePort]');
+      return true;
+    }
+
+    /**
+     * Resolve the ?layout= parameter against the saved layouts.
+     * Accepts an id or a name, matched case-insensitively so a URL painted on
+     * a kiosk shortcut doesn't have to reproduce the exact casing.
+     */
+    function resolveLayout(layouts, want) {
+      if (!want) return null;
+      const key = want.trim().toLowerCase();
+      return layouts.find(l => String(l.id).toLowerCase() === key)
+          || layouts.find(l => String(l.name).toLowerCase() === key)
+          || null;
+    }
+
+    function layoutIndex(layouts) {
+      if (layouts.length === 0) return '<p>No layouts are saved on this server yet.</p>';
+      const items = layouts.map(l =>
+        `<li><a href="?layout=${encodeURIComponent(l.id)}">${esc(l.name)}</a>
+             &nbsp;<code>?layout=${esc(l.id)}</code></li>`).join('');
+      return `<p>Available layouts:</p><ul>${items}</ul>`;
+    }
+
+    (async function init() {
+      if (!checkSecureContext()) return;
+
+      const want = new URLSearchParams(location.search).get('layout');
+
+      let layouts;
+      try {
+        layouts = (await fetchJSON('/api/layouts')).layouts || [];
+      } catch (err) {
+        message('Could not reach the server', `<p>${esc(err.message)}</p>`);
+        return;
+      }
+
+      if (!want) {
+        message('Which layout?', `
+          <p>Add a layout to the URL, e.g. <code>/camera-view.html?layout=default</code>.</p>
+          ${layoutIndex(layouts)}`);
+        return;
+      }
+
+      const layout = resolveLayout(layouts, want);
+      if (!layout) {
+        message('No such layout', `
+          <p>Nothing matches <code>${esc(want)}</code> by id or name.</p>
+          ${layoutIndex(layouts)}`);
+        return;
+      }
+
+      document.title = `LookyLooky - ${layout.name}`;
+
+      // Match the dashboard's playout buffer and decode budget so a pane
+      // behaves the same on either page.
+      let bufferMs = 150, maxFullMotionPanes = 10, qualityPolicy = 'sub', mainMinWidth = 1280;
+      try {
+        const info = await fetchJSON('/api/info');
+        if (typeof info?.webcodecs?.bufferMs === 'number') bufferMs = info.webcodecs.bufferMs;
+        if (typeof info?.webcodecs?.maxFullMotionPanes === 'number') {
+          maxFullMotionPanes = info.webcodecs.maxFullMotionPanes;
+        }
+        if (info?.webcodecs?.qualityPolicy) qualityPolicy = info.webcodecs.qualityPolicy;
+        if (info?.webcodecs?.mainMinWidth) mainMinWidth = info.webcodecs.mainMinWidth;
+      } catch { /* keep defaults */ }
+
+      const container = document.getElementById('viewGrid');
+      // interactive:false makes panes drag-inert and binds no pointer handlers.
+      const grid = new CameraGrid({ container, wsUrl: STREAM_URL, bufferMs, maxFullMotionPanes, interactive: false,
+                                    fullMotion: LookyCompat.webcodecs, qualityPolicy, mainMinWidth });
+      // ?quality=high|low pins the whole board (a kiosk URL), like the dashboard's Quality menu.
+      const qp = (new URLSearchParams(location.search).get('quality') || '').toLowerCase();
+      if (qp === 'high' || qp === 'main') grid.setQualityOverride('main');
+      else if (qp === 'low' || qp === 'sub') grid.setQualityOverride('sub');
+
+      // Every interaction hook is deliberately left unset: no hover controls,
+      // no empty-slot affordance, no click-to-focus, no drag handlers.  An
+      // empty slot renders as plain background.
+      grid.buildEmptySlot = () => '';
+
+      window.__claudiferGrid = grid;   // parity with the dashboard, for DevTools
+
+      let cameras = [];
+      async function refresh() {
+        try {
+          const data = await fetchJSON('/api/cameras');
+          cameras = data.cameras || data;
+          grid.update(cameras);
+        } catch { /* transient — the next poll retries */ }
+      }
+
+      try {
+        cameras = (await fetchJSON('/api/cameras')).cameras || [];
+      } catch (err) {
+        message('Could not load cameras', `<p>${esc(err.message)}</p>`);
+        return;
+      }
+
+      grid.setLayout(layout, cameras);
+      setInterval(refresh, POLL_MS);
+
+      // Pick up layout edits made on the dashboard without needing a reload.
+      setInterval(async () => {
+        try {
+          const fresh = resolveLayout((await fetchJSON('/api/layouts')).layouts || [], want);
+          if (fresh && JSON.stringify(fresh) !== JSON.stringify(grid._layout)) {
+            grid.setLayout(fresh, cameras);
+          }
+        } catch { /* transient */ }
+      }, POLL_MS * 2);
+    })();
+  </script>
+</body>
+</html>

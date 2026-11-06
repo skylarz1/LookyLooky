@@ -1,0 +1,12 @@
+node_modules/
+data/
+dist/
+test/out/
+*.log
+# Real camera configs carry passwords: never commit them. Only the examples and the README.
+config/*
+!config/README.md
+!config/*.example.xml
+!config/*.example.json
+import/*
+!import/README.txt

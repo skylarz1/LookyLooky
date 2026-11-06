@@ -1,0 +1,41 @@
+# LookyLooky — network camera relay.
+#
+#   docker compose up -d --build
+#   then open  https://<this machine's LAN IP>:8443/setup.html  on each viewing device
+#
+# To drop it into another stack later, copy the `lookylooky` service (and the
+# volume) into that stack's compose file — see README.md, "Using it from another stack".
+
+services:
+  lookylooky:
+    build: .
+    image: lookylooky:latest
+    container_name: lookylooky
+    restart: unless-stopped
+    ports:
+      - "8080:8080"   # HTTP  — MJPEG/snapshot links for other tools; what a reverse proxy points at
+      - "8443:8443"   # HTTPS — what browsers use (WebCodecs needs a secure page)
+    environment:
+      TZ: "America/Chicago"
+      # REQUIRED for HTTPS on other devices: every name/IP browsers will use to reach this box,
+      # comma separated. The certificate is issued for these. (Container IPs are added automatically,
+      # but inside Docker those are not your LAN address.)
+      LOOKY_HOSTNAMES: "192.168.1.10,lookylooky.local"
+      # If the host ports above are remapped, say what browsers actually see:
+      # LOOKY_PUBLIC_HTTPS_PORT: "8443"
+      # LOOKY_PUBLIC_HTTP_PORT: "8080"
+      # Protect the dashboard and every write endpoint (user "admin" unless LOOKY_ADMIN_USER is set):
+      # LOOKY_ADMIN_PASSWORD: "change-me"
+      # Pages from another stack's origin that may embed the wall / call the API (default "*"):
+      # LOOKY_ALLOWED_ORIGINS: "https://noodleman.example.lan"
+      # Terminate TLS elsewhere instead (reverse proxy): LOOKY_HTTPS: "0"
+    volumes:
+      - lookylooky-data:/data      # cameras, layouts, settings, certificates, recordings
+      - ./config:/seed:ro          # imported on FIRST boot only (cameras.xml, camera-layouts.xml, cameras.json)
+      - ./import:/import:ro        # optional: Settings → System → Import from /import
+    # RTSP over UDP needs inbound ports, which bridged networking does not give. Use TCP (the default)
+    # or uncomment this (and remove `ports:`):
+    # network_mode: host
+
+volumes:
+  lookylooky-data:

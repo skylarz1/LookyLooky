@@ -1,0 +1,21 @@
+<resource fileversion="1.0">
+	<!-- Example only (files with "example" in the name are never imported).
+	     Copy to cameras.xml, put your cameras in, and it is imported on first boot. -->
+	<camera-settings ffmpeg-path="ffmpeg" max-restarts="10" restart-delay="5000" rtsp-transport="tcp" recycle-after="86400000" watchdog-interval="60000" audio-bitrate="64k" audio-channels="1" buffer-ms="150" max-full-motion="10" mjpeg-enabled="true" mjpeg-fps="5" mjpeg-quality="5" mjpeg-scale="640:-2" recordings-dir="" recordings-retention-days="7" recordings-max-duration="7200000" />
+	<cameras>
+		<!-- Dahua-style URLs. Encode special characters in passwords (! is %21). -->
+		<camera id="1" type="IP" name="Front Desk" manufacturer="" source="" camera-id="cam-01" group="Lobby" enabled="true">
+			<source label="main" url="rtsp://admin:PASSWORD@192.168.1.101:554/cam/realmonitor?channel=1&amp;subtype=0&amp;unicast=true&amp;proto=Onvif" transport="tcp" type="rtsp" />
+			<source label="sub" url="rtsp://admin:PASSWORD@192.168.1.101:554/cam/realmonitor?channel=1&amp;subtype=1&amp;unicast=true&amp;proto=Onvif" transport="tcp" type="rtsp" />
+		</camera>
+		<camera id="2" type="IP" name="Back Door" manufacturer="" source="" camera-id="cam-02" group="Lobby" enabled="true">
+			<source label="main" url="rtsp://admin:PASSWORD@192.168.1.102/media/video1" transport="tcp" type="rtsp" />
+			<source label="sub" url="rtsp://admin:PASSWORD@192.168.1.102/media/video2" transport="tcp" type="rtsp" />
+		</camera>
+		<!-- An NVR stream (UniFi Protect style) -->
+		<camera id="3" type="IP" name="Hallway" manufacturer="" source="" camera-id="hallway" group="Hall" enabled="true">
+			<source label="main" url="rtsp://192.168.1.6:7447/MAINSTREAMTOKEN" transport="tcp" type="rtsp" />
+			<source label="sub" url="rtsp://192.168.1.6:7447/SUBSTREAMTOKEN" transport="tcp" type="rtsp" />
+		</camera>
+	</cameras>
+</resource>

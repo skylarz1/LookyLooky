@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<!--
+  LookyLooky camera wall, standalone: /wall.html?layout=<id or name>[&camera=<id>][&storyid=…]
+
+  The 7f wall (one main pane, up to six previews; tap a preview to put it up; audio follows the main
+  pane). Embed it in another stack with an iframe and drive it over postMessage:
+
+    frame.contentWindow.postMessage({ noodleman: { topic: 'select-camera', value: { cameraId: 'Lobby' } } }, '*');
+    frame.contentWindow.postMessage({ noodleman: { topic: 'wall-layout',  value: { layout: 'Diner 6 View' } } }, '*');
+    frame.contentWindow.postMessage({ noodleman: { topic: 'current-objective',
+                                     value: { StoryID: 1, Objective: { ID: 7, CameraID: 'dinerBI2' } } } }, '*');
+
+  …or import /js/widgets/camera-wall.js into a page of your own (see README, "Using it from another stack").
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>LookyLooky - Wall</title>
+  <link rel="icon" type="image/svg+xml" href="/images/favicon.svg">
+  <script src="/js/compat.js"></script>
+  <script>
+    LookyCompat.securePort = '[LookyLooky.SecurePort]';
+    LookyCompat.requireSecure(LookyCompat.securePort);
+  </script>
+  <script src="/js/noodleman.js"></script>
+  <link rel="stylesheet" href="/styles/camera-wall.css">
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+    /* The wall sizes itself against this box (container queries), so it must have a definite height. */
+    #wall { position: fixed; inset: 0; height: 100vh; height: 100dvh;
+            padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+            box-sizing: border-box; }
+  </style>
+</head>
+<body>
+  <div id="wall"></div>
+  <script type="module">
+    import CameraWall from '/js/widgets/camera-wall.js';
+
+    const q = new URLSearchParams(location.search);
+    const layout = q.get('layout');
+    const storyid = q.get('storyid');
+
+    async function start() {
+      let chosen = layout;
+      if (!chosen && storyid == null) {
+        // No layout named: use the first one, so the bare URL shows something.
+        try { chosen = ((await (await fetch('/api/layouts')).json()).layouts || [])[0]?.id || 'default'; }
+        catch { chosen = 'default'; }
+      }
+      const wall = new CameraWall({ id: 'wall', layout: chosen, storyid: storyid ?? undefined, quality: q.get('quality') || '' });
+      window.__claudiferWall = wall;
+      const cam = q.get('camera');
+      if (cam) {
+        // Wait for the first build, then put the requested camera up.
+        const t = setInterval(() => { if (wall.grid) { clearInterval(t); wall.Select(cam); } }, 200);
+        setTimeout(() => clearInterval(t), 15000);
+      }
+    }
+    start();
+  </script>
+</body>
+</html>

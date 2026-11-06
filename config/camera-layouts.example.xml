@@ -1,0 +1,15 @@
+<resource fileversion="1.0">
+	<!-- Example only. Copy to camera-layouts.xml. grid: 1x1 2x2 3x2 3x3 4x4 5x5 6f 7f 8f 10f 13f 17f 10d 14d.
+	     camera = the camera-id from cameras.xml. -->
+	<camera-layouts>
+		<layout id="default" name="Default" description="" grid="2x2">
+			<slot index="0" camera="cam-01" stream="webcodecs" />
+			<slot index="1" camera="cam-02" stream="webcodecs" />
+			<slot index="2" camera="hallway" stream="webcodecs" />
+		</layout>
+		<layout id="lobby" name="Lobby" description="" grid="6f">
+			<slot index="0" camera="cam-01" stream="webcodecs" />
+			<slot index="1" camera="cam-02" stream="webcodecs" />
+		</layout>
+	</camera-layouts>
+</resource>

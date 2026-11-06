@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LookyLooky - Setup</title>
+  <link rel="icon" type="image/svg+xml" href="/images/favicon.svg">
+  <script src="/js/compat.js"></script>
+  <style>
+    :root { --bg:#0f1117; --surface:#1a1d27; --border:#2a2d3a; --text:#e1e4ed; --dim:#8b8fa3; --accent:#f2711c; --green:#34d399; --red:#f87171; --yellow:#fbbf24; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+    main { max-width: 760px; margin: 0 auto; padding: 24px 16px 60px; }
+    h1 { font-size: 22px; margin: 0 0 4px; } h2 { font-size: 17px; margin: 28px 0 8px; }
+    p, li { color: #cfd3de; } .dim { color: var(--dim); font-size: 13px; }
+    a { color: var(--accent); }
+    code { background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 13px; word-break: break-all; }
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; }
+    table { width: 100%; border-collapse: collapse; } td { padding: 6px 4px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    td:first-child { width: 46%; color: var(--dim); }
+    .ok { color: var(--green); } .bad { color: var(--red); } .warn { color: var(--yellow); }
+    .btn { display: inline-block; background: var(--accent); color: #fff; text-decoration: none; padding: 8px 14px; border-radius: 6px; font-weight: 600; margin: 4px 6px 4px 0; }
+    .btn.ghost { background: none; border: 1px solid var(--border); color: var(--text); }
+    details { margin: 8px 0; } summary { cursor: pointer; font-weight: 600; }
+    ol { padding-left: 22px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>LookyLooky setup</h1>
+  <div class="dim">Version [LookyLooky.Version]</div>
+
+  <h2>This browser</h2>
+  <div class="card"><table id="caps"></table></div>
+  <p id="verdict"></p>
+
+  <h2>Why HTTPS</h2>
+  <p>Full-motion video is decoded in the browser with <b>WebCodecs</b>, and browsers only offer WebCodecs on a
+     <i>secure</i> page: HTTPS, or <code>localhost</code>. Opened over plain HTTP on a LAN address, the pages still
+     work but every pane is a JPEG thumbnail with no sound.</p>
+  <p>LookyLooky serves HTTPS on its own (port <b id="hp">[LookyLooky.SecurePort]</b>) with a certificate from a
+     small certificate authority it created for itself. Install that authority on each viewing device once and the
+     secure pages open with no warnings:</p>
+  <p><a class="btn" href="/ca.crt" download="lookylooky-ca.crt">Download the certificate (ca.crt)</a>
+     <a class="btn ghost" id="secureLink" href="#">Open the secure dashboard</a></p>
+
+  <details open><summary>iPad / iPhone (Safari)</summary>
+    <ol>
+      <li>Open this page <b>in Safari</b> and tap <b>Download the certificate</b>. Allow the download ("This website is
+          trying to download a configuration profile").</li>
+      <li>Open <b>Settings</b> → <b>Profile Downloaded</b> (near the top; or <b>General → VPN &amp; Device Management</b>)
+          → <b>Install</b>, and enter the passcode.</li>
+      <li>Then <b>Settings → General → About → Certificate Trust Settings</b> and switch on
+          <b>LookyLooky Local CA</b>. This second step is the one that is easy to miss.</li>
+      <li>Open <code id="iosUrl"></code>. iPad 6th gen and other devices on iPadOS 16.4–17 get full-motion video,
+          with sound sent to them as PCM (they have no audio decoder for the usual stream). Tap a pane once to allow sound.</li>
+    </ol>
+  </details>
+  <details><summary>Android (Chrome)</summary>
+    <ol><li>Download the certificate. <b>Settings → Security → Encryption &amp; credentials → Install a certificate → CA certificate</b>, pick the file.</li>
+        <li>Open the secure address.</li></ol>
+  </details>
+  <details><summary>Windows (Chrome / Edge)</summary>
+    <ol><li>Download and open <code>ca.crt</code> → <b>Install Certificate</b> → <b>Local Machine</b> →
+        <b>Place all certificates in the following store</b> → <b>Trusted Root Certification Authorities</b>.</li>
+        <li>Restart the browser and open the secure address.</li></ol>
+  </details>
+  <details><summary>macOS</summary>
+    <ol><li>Download and open <code>ca.crt</code> (Keychain Access opens). Double-click <b>LookyLooky Local CA</b> →
+        <b>Trust</b> → <b>When using this certificate: Always Trust</b>.</li></ol>
+  </details>
+  <details><summary>Linux / kiosk Chrome</summary>
+    <ol><li><code>sudo cp lookylooky-ca.crt /usr/local/share/ca-certificates/ &amp;&amp; sudo update-ca-certificates</code>;
+        for Chrome also import it under <b>Settings → Privacy and security → Security → Manage certificates → Authorities</b>.</li>
+        <li>A kiosk that cannot install certificates can instead be started with
+        <code>--unsafely-treat-insecure-origin-as-secure=http://HOST:PORT --user-data-dir=/tmp/kiosk</code>.</li></ol>
+  </details>
+  <p class="dim">The certificate covers these names: <span id="names"></span>. If you reach the box by another name
+     or IP (e.g. its LAN address from the Docker host), add it to <code>LOOKY_HOSTNAMES</code> and restart — the
+     server certificate is reissued from the same authority, so devices do not need to install anything again.
+     Behind a reverse proxy that already does HTTPS, none of this is needed.</p>
+
+  <h2>Pages</h2>
+  <ul>
+    <li><a href="/cameras.html">Dashboard</a> — manage cameras and layouts, watch any layout.</li>
+    <li><a href="/camera-view.html">View-only board</a> — <code>/camera-view.html?layout=&lt;id or name&gt;</code>, for wall displays.</li>
+    <li><a href="/wall.html">Camera wall</a> — one main pane over six previews; <code>/wall.html?layout=&lt;id or name&gt;</code>.</li>
+    <li>Per camera: <code>/stream/&lt;id&gt;/mjpeg</code>, <code>/stream/&lt;id&gt;/snapshot</code> (also over plain HTTP, for other tools).</li>
+  </ul>
+</main>
+<script>
+  const C = window.LookyCompat;
+  const port = '[LookyLooky.SecurePort]';
+  const secureBase = C.httpsUrl(port) ? 'https://' + location.hostname + (port === '443' ? '' : ':' + port) : location.origin;
+  document.getElementById('secureLink').href = secureBase + '/cameras.html';
+  document.getElementById('iosUrl').textContent = secureBase + '/cameras.html';
+  const rows = [
+    ['Page origin', location.origin],
+    ['Secure context', C.secure ? '<span class="ok">yes</span>' : '<span class="bad">no — open over HTTPS</span>'],
+    ['Video (WebCodecs VideoDecoder)', C.webcodecs ? '<span class="ok">yes — full motion</span>' : '<span class="bad">no — thumbnails only</span>'],
+    ['Audio', C.audio === 'opus' ? '<span class="ok">Opus (AudioDecoder)</span>'
+            : C.audio === 'pcm' ? '<span class="ok">PCM fallback (no AudioDecoder — e.g. Safari before 26)</span>'
+            : '<span class="warn">none</span>'],
+    ['Fullscreen', document.fullscreenEnabled ? '<span class="ok">yes</span>' : '<span class="warn">emulated</span>'],
+  ];
+  document.getElementById('caps').innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+  document.getElementById('verdict').innerHTML = C.webcodecs
+    ? '<span class="ok">This browser is ready for full-motion video.</span>'
+    : (C.secure ? '<span class="warn">This browser is too old for full-motion video (needs Safari 16.4+, Chrome/Edge 94+, Firefox 130+).</span>'
+                : '<span class="warn">Install the certificate below, then open the secure address.</span>');
+  fetch('/api/info').then((r) => r.json()).then((i) => {
+    document.getElementById('names').textContent = (i.tls && i.tls.names || []).join(', ') || '(custom certificate)';
+  }).catch(() => {});
+</script>
+</body>
+</html>
