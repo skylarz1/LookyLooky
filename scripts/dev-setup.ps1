@@ -176,11 +176,34 @@ if (Test-Path $override) {
     }
     if (-not $LanIp) { throw "Couldn't work out this PC's LAN IP. Run again with -LanIp 192.168.x.y (see ipconfig)." }
     if (-not $TimeZone) {
-        $TimeZone = "America/Chicago"
-        try {
-            $iana = $null
-            if ([System.TimeZoneInfo]::TryConvertWindowsIdToIanaId([System.TimeZoneInfo]::Local.Id, [ref]$iana)) { $TimeZone = $iana }
-        } catch { Warn "Couldn't map the Windows time zone (needs PowerShell 7) - using $TimeZone. Pass -TimeZone to change it." }
+        $winTz = [System.TimeZoneInfo]::Local.Id
+        $iana = $null
+        # .NET Framework (Windows PowerShell 5.1) has no Windows-to-IANA
+        # conversion, so try it (PowerShell 7) and fall back to a short table.
+        try { if (-not [System.TimeZoneInfo]::TryConvertWindowsIdToIanaId($winTz, [ref]$iana)) { $iana = $null } } catch { $iana = $null }
+        if (-not $iana) {
+            $tzTable = @{
+                "Eastern Standard Time"    = "America/New_York"
+                "Central Standard Time"    = "America/Chicago"
+                "Mountain Standard Time"   = "America/Denver"
+                "US Mountain Standard Time" = "America/Phoenix"
+                "Pacific Standard Time"    = "America/Los_Angeles"
+                "Alaskan Standard Time"    = "America/Anchorage"
+                "Hawaiian Standard Time"   = "Pacific/Honolulu"
+                "Atlantic Standard Time"   = "America/Halifax"
+                "GMT Standard Time"        = "Europe/London"
+                "W. Europe Standard Time"  = "Europe/Berlin"
+                "Romance Standard Time"    = "Europe/Paris"
+                "AUS Eastern Standard Time" = "Australia/Sydney"
+                "UTC"                      = "Etc/UTC"
+            }
+            if ($tzTable.ContainsKey($winTz)) { $iana = $tzTable[$winTz] }
+        }
+        if ($iana) { $TimeZone = $iana }
+        else {
+            $TimeZone = "America/Chicago"
+            Warn "Couldn't map the Windows time zone '$winTz' - using $TimeZone. Pass -TimeZone to change it."
+        }
     }
     $hostNames = "$LanIp,localhost,$($env:COMPUTERNAME.ToLower())"
     @(
@@ -209,6 +232,15 @@ if (Get-NetFirewallRule -DisplayName "LookyLooky" -ErrorAction SilentlyContinue)
         Warn "Not running as administrator, so the firewall rule was not added. In an admin PowerShell run:"
         Info 'New-NetFirewallRule -DisplayName "LookyLooky" -Direction Inbound -Protocol TCP -LocalPort 8080,8443 -Action Allow -Profile Private'
     }
+}
+# The rule is for Private networks only. Windows often files a new network as
+# Public, and then iPads simply can't connect. Say so; don't change it here.
+$publicNets = @(Get-NetConnectionProfile -ErrorAction SilentlyContinue |
+    Where-Object { $_.NetworkCategory -eq "Public" -and $_.InterfaceAlias -notmatch "vEthernet|WSL|Docker|VirtualBox|VMware" })
+foreach ($net in $publicNets) {
+    Warn "Network '$($net.Name)' on '$($net.InterfaceAlias)' is set to Public, so the rule above does not apply to it and other devices can't reach LookyLooky."
+    Info "If it's your own home/office network, make it Private (Settings -> Network & internet -> the network -> Private), or in an admin PowerShell:"
+    Info ("Set-NetConnectionProfile -InterfaceAlias '{0}' -NetworkCategory Private" -f $net.InterfaceAlias)
 }
 
 # ---------------------------------------------------------------------------
