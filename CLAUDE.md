@@ -113,27 +113,43 @@ test/e2e.js               browser smoke test     test/features.js  multi-audio, 
     (= master mute).
   - Pane speakers are not persisted.
 
+## Verified in a Linux cloud session (Docker Engine, not Docker Desktop)
+
+- **Docker build:** the Dockerfile builds unchanged (`node:22-alpine`,
+  FFmpeg 8.1.3, Node 22). `test/e2e.js` 13/13 and `test/features.js` 22/22
+  pass against the dev compose instance.
+- **`%21` in RTSP passwords (cam-29 to cam-34):** FFmpeg URL-decodes the
+  credentials itself, for both Digest and Basic auth (checked against a fake
+  RTSP server expecting `pa!ss` from `pa%21ss`). Don't decode them in
+  `sources.js`: that would break passwords containing a literal `%`.
+- **The owner's real config imports:** 35 cameras, 7 layouts. cam-28 has only
+  a `main` variant.
+- **UDP→TCP fallback fires** (`no picture over UDP — switching this stream to
+  TCP` for Lobby1). The camera itself was unreachable from the cloud.
+- **`scripts/dev-setup.ps1` parses** (PowerShell 7 parser) and is ASCII only.
+  It has not been executed on Windows.
+
+Reading `/api/cameras`: `status: running` means *enabled*, not *connected*.
+Streams start on demand, and `lastError` only shows while a stream is
+retrying (someone is watching it). To check a camera, open it, or fetch
+`/stream/<id>/snapshot` (504 with a reason after 12 s if it can't connect).
+
 ## Not verified yet (do these first on the owner's hardware)
 
-1. **Docker build:** the image has never been built — the authoring
-   environment couldn't reach Docker Hub. Expect to fix small Dockerfile
-   issues on the first `docker compose up --build`. It's
-   `node:22-alpine` + `apk add ffmpeg openssl tini tzdata`.
-2. **Real cameras:** never tested.
+1. **Docker Desktop on Windows:** the first `docker compose up --build`
+   there, and `scripts/dev-setup.ps1` run end to end on Windows PowerShell
+   5.1.
+2. **Real cameras:** never connected.
    - Most are Dahua-style `/cam/realmonitor` URLs; cam-10 and cam-26 use
      `/video/livemedia`.
-   - Cameras whose passwords contain `!` are written `%21` in the URL
-     (cam-29 to cam-34). Check that FFmpeg logs into those. If not, the fix
-     is to URL-decode credentials in `sources.js` before handing them to
-     FFmpeg.
+   - cam-29 to cam-34 (`%21` passwords): FFmpeg decodes them (above). If
+     login still fails, the password itself is wrong.
    - Lobby1 is a UniFi Protect stream (`192.168.1.6:7447`) configured as
-     UDP. It should fall back to TCP.
+     UDP. Check that the TCP retry plays.
 3. **A real iPad 6th gen:** PCM audio, pinch zoom, the HQ/LQ and speaker
    buttons on tap, the certificate install flow. Tests ran in headless
    Chromium with `AudioDecoder` removed to simulate it.
-4. **`scripts/dev-setup.ps1` has never been executed** (no PowerShell in the
-   authoring environment). Run it, and fix what breaks.
-5. **Load with 35 cameras:** CPU and RAM per FFmpeg, and how many
+4. **Load with 35 cameras:** CPU and RAM per FFmpeg, and how many
    simultaneous RTSP sessions each camera model allows.
 
 ## Backlog / ideas
