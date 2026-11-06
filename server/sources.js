@@ -3,7 +3,8 @@
  * Camera sources: how to hand each kind of URL to FFmpeg, and how to explain
  * its failures to a person.
  *
- *   rtsp://  the normal case — IP cameras, NVRs, UniFi Protect (rtsp://host:7447/…)
+ *   rtsp://  the normal case — IP cameras, NVRs, UniFi Protect (rtsp://host:7447/…).
+ *            Over TCP (default), UDP, or multicast (see "Multicast" below).
  *   http://  cameras that serve a live MP4/MJPEG over HTTP.  Includes the old
  *            camera-proxy's session-cookie login (Cortex / Hikvision-style
  *            "POST /login then send the cookie"), ported here so those cameras
@@ -89,6 +90,46 @@ async function getSession(key, url, auth, log) {
 const clearSession = (key) => sessionCache.delete(key);
 const clearAllSessions = () => sessionCache.clear();
 
+/* --- Multicast ----------------------------------------------------------- */
+/*
+ * An RTSP source can be pulled as RTP multicast: the RTSP control connection
+ * stays TCP, but the camera sends the video once onto a multicast group that
+ * every receiver joins, so another viewer, NVR or relay costs the camera no
+ * extra encoding or bandwidth.  Used when the source's transport is
+ * 'multicast', or for every RTSP source when settings.ffmpeg.multicast is
+ * 'prefer'.  A multicast source may carry its own `multicastUrl` (from ONVIF;
+ * some cameras use a different path for it); `url` stays the unicast one.
+ *
+ * Multicast only reaches LookyLooky when the container is on the camera's
+ * network (Linux host with network_mode: host).  Docker Desktop and bridged
+ * networks drop it, so a stream that gets no picture over multicast (or
+ * keeps stalling on it, the usual sign of a switch without an IGMP querier)
+ * falls back to unicast TCP, and that stream skips multicast for
+ * MULTICAST_RETRY_MS afterwards so every start isn't delayed by the attempt.
+ */
+
+const MULTICAST_RETRY_MS = 60 * 60 * 1000;
+const multicastMemory = new Map(); // key -> { ok: boolean, at }
+
+function wantsMulticast(source, settings) {
+  if (!source || (source.type || sourceType(source.url)) !== 'rtsp') return false;
+  if (source.transport === 'multicast') return true;
+  return (settings && settings.ffmpeg && settings.ffmpeg.multicast) === 'prefer';
+}
+
+/** 'ok' (multicast played recently), 'failed' (fell back recently) or 'unknown'. */
+function multicastState(key) {
+  const m = multicastMemory.get(key);
+  if (!m || Date.now() - m.at > MULTICAST_RETRY_MS) return 'unknown';
+  return m.ok ? 'ok' : 'failed';
+}
+
+function noteMulticast(key, ok) { if (key) multicastMemory.set(key, { ok: !!ok, at: Date.now() }); }
+/** Forget what multicast did, for every stream or for one camera's ('cam-01/'). */
+function clearMulticastMemory(prefix = '') {
+  for (const k of [...multicastMemory.keys()]) if (k.startsWith(prefix)) multicastMemory.delete(k);
+}
+
 /* --- URLs ---------------------------------------------------------------- */
 
 function buildUrl(source) {
@@ -119,7 +160,7 @@ function basicHeader(auth) {
  * @param {object} settings full settings
  * @param {object} opts { key, lowLatency=true, log }
  */
-async function inputArgs(source, settings, { key = '', lowLatency = true, slowProbe = false, forceTcp = false, log } = {}) {
+async function inputArgs(source, settings, { key = '', lowLatency = true, slowProbe = false, forceTcp = false, multicast, log } = {}) {
   const type = source.type || sourceType(source.url);
   // NOT +nobuffer: it discards the packets read while probing, and the first
   // of those is the keyframe — every start would then wait a whole extra GOP
@@ -142,7 +183,18 @@ async function inputArgs(source, settings, { key = '', lowLatency = true, slowPr
     };
   }
   if (type === 'rtsp') {
-    const transport = forceTcp ? 'tcp' : (source.transport || settings.ffmpeg.rtspTransport || 'tcp');
+    // multicast: true/false from the caller wins; otherwise the source and the
+    // settings decide, unless this stream recently fell back from it.
+    const useMulticast = !forceTcp && (multicast !== undefined ? !!multicast
+      : wantsMulticast(source, settings) && multicastState(key) !== 'failed');
+    if (useMulticast) {
+      return {
+        args: ['-rtsp_transport', 'udp_multicast', '-timeout', '10000000', ...lat, '-i', source.multicastUrl || source.url],
+        video: '0:v:0', audio: '0:a:0', multicast: true,
+      };
+    }
+    let transport = forceTcp ? 'tcp' : (source.transport || settings.ffmpeg.rtspTransport || 'tcp');
+    if (transport === 'multicast') transport = 'tcp'; // the unicast fallback
     return {
       args: ['-rtsp_transport', transport, '-timeout', '10000000', ...lat, '-i', source.url],
       video: '0:v:0', audio: '0:a:0',
@@ -185,6 +237,7 @@ function friendlyError(stderr) {
     [/No route to host|Network is unreachable|Host is unreachable/i, 'The camera cannot be reached on the network'],
     [/timed out|Operation timed out|Connection timed out/i, 'The camera did not answer in time'],
     [/Name or service not known|Temporary failure in name resolution|Failed to resolve/i, 'The camera’s host name could not be resolved'],
+    [/461 Unsupported Transport|Unsupported transport/i, 'The camera does not offer that transport (multicast switched off on it?)'],
     [/453 Not Enough Bandwidth|Not Enough Bandwidth/i, 'The camera refused another stream (too many connections open to it)'],
     [/503 Service Unavailable/i, 'The camera is busy (503) — it may have too many viewers already'],
     [/Invalid data found when processing input/i, 'The camera sent data FFmpeg could not read'],
@@ -199,5 +252,5 @@ function friendlyError(stderr) {
 
 module.exports = {
   inputArgs, buildUrl, redact, hostOf, friendlyError, login, getSession, clearSession, clearAllSessions,
-  httpRequest, basicHeader,
+  httpRequest, basicHeader, wantsMulticast, multicastState, noteMulticast, clearMulticastMemory, MULTICAST_RETRY_MS,
 };

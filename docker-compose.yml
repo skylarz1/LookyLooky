@@ -33,8 +33,9 @@ services:
       - lookylooky-data:/data      # cameras, layouts, settings, certificates, recordings
       - ./config:/seed:ro          # imported on FIRST boot only (cameras.xml, camera-layouts.xml, cameras.json)
       - ./import:/import:ro        # optional: Settings → System → Import from /import
-    # RTSP over UDP needs inbound ports, which bridged networking does not give. Use TCP (the default)
-    # or uncomment this (and remove `ports:`):
+    # RTSP over UDP and multicast need the container on the cameras' network, which bridged networking
+    # (and Docker Desktop) does not give. Use TCP (the default), or on a Linux host uncomment this
+    # (and remove `ports:`). Multicast streams fall back to unicast by themselves when it can't arrive.
     # network_mode: host
 
 volumes:

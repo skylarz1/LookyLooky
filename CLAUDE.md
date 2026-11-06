@@ -39,8 +39,10 @@ server/ws-server.js       /cameras/stream: subscribe {cameraId, quality, audio:'
 server/mjpeg.js           thumbnails/MJPEG/snapshots decoded from the running session's fMP4 (no extra camera connection)
 server/cameras.js         camera list/status, sessions, keep-warm, recycle, stray reaping, probing
 server/api.js             REST API (see README)    server/config.js  persistence, defaults, XML/JSON import parsers
-server/sources.js         FFmpeg input args per URL type, HTTP session-cookie login, friendly error messages
-server/recordings.js  onvif.js  scan.js  probe.js  tls.js (local CA)  legacy-proxy.js (camera-proxy endpoints)
+server/sources.js         FFmpeg input args per URL type (incl. RTSP multicast + its fallback memory), HTTP session-cookie
+                          login, friendly error messages
+server/onvif.js           ONVIF discovery (stream URIs, multicast URIs and groups) and lookupMulticast for existing cameras
+server/recordings.js  scan.js  probe.js  tls.js (local CA)  legacy-proxy.js (camera-proxy endpoints)
 public/js/camera/         viewer.js (CameraGrid/CameraPane: tiers, budget, zoom, quality, per-pane audio),
                           webcodecsClient.js, audioWorkletProcessor.js — see public/js/camera/README.md
 public/js/widgets/camera-wall.js   the wall widget (story mode via noodleman, or fixed layout)
@@ -52,6 +54,7 @@ public/styles/camera-viewer.css    full-page styles; camera-wall.css is the SAME
 config/                   first-boot seed. Real cameras.xml / camera-layouts.xml contain camera passwords: git-ignored,
                           never commit them. Only *.example.xml are tracked.
 test/e2e.js               browser smoke test     test/features.js  multi-audio, zoom, quality, per-pane speakers
+test/onvif.js             fake ONVIF camera: multicast discovery/lookup, FFmpeg args, fallback memory (no instance needed)
 ```
 
 ## Rules
@@ -105,6 +108,17 @@ test/e2e.js               browser smoke test     test/features.js  multi-audio, 
   drag-drop, wall main change, fullscreen focus).
 - **Quality precedence:** decoder overload, then pane HQ/LQ button, then
   view override, then server policy (default `'sub'`, substreams only).
+- **Multicast falls back to unicast, and remembers it** (`sources.js`):
+  - no picture within 8 s, or two stalls in 15 minutes (a switch without an
+    IGMP querier) → unicast;
+  - that stream then skips multicast for an hour; Recycle clears this;
+  - `transport: 'multicast'` falls back to TCP; with the global `prefer`, a
+    `udp` source falls back to UDP;
+  - `multicastUrl` is only for cameras whose multicast RTSP address
+    differs. Most negotiate multicast on the normal URL in SETUP.
+
+  It never works on Docker Desktop, so the default stays TCP and multicast
+  is opt-in.
 - **Audio:**
   - One focused pane follows the master mute/volume.
   - Pane speakers add more, at master volume, ignoring the master mute.
@@ -129,6 +143,17 @@ test/e2e.js               browser smoke test     test/features.js  multi-audio, 
 - **`scripts/dev-setup.ps1` parses** (PowerShell 7 parser) and is ASCII only.
   It has not been executed on Windows.
 
+- **Multicast (branch `claude/new-session-iqef3y`):** checked against
+  mediamtx serving RTP multicast:
+  - LookyLooky on host networking gets the stream over multicast
+    (`delivery: "multicast"`);
+  - with multicast blocked (iptables), it switches to unicast after 8 s and
+    the next cold start goes straight to unicast;
+  - `test/onvif.js` covers discovery against a fake ONVIF camera.
+
+  **Never tried with a real camera**: no Dahua multicast URI or IGMP
+  behaviour has been seen.
+
 Reading `/api/cameras`: `status: running` means *enabled*, not *connected*.
 Streams start on demand, and `lastError` only shows while a stream is
 retrying (someone is watching it). To check a camera, open it, or fetch
@@ -151,6 +176,14 @@ retrying (someone is watching it). To check a camera, open it, or fetch
    Chromium with `AudioDecoder` removed to simulate it.
 4. **Load with 35 cameras:** CPU and RAM per FFmpeg, and how many
    simultaneous RTSP sessions each camera model allows.
+5. **Multicast with the real cameras:**
+   - Run Settings → Streaming → *Look up multicast on all cameras (ONVIF)*
+     and see what the Dahua cameras report: group, port, and whether
+     multicast is enabled on them.
+   - On Docker Desktop, expect "no picture over multicast", then unicast.
+   - Real multicast needs LookyLooky on a Linux host with
+     `network_mode: host`, plus a switch that forwards it, ideally with an
+     IGMP querier.
 
 ## Backlog / ideas
 

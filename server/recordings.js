@@ -10,7 +10,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
-const { inputArgs, friendlyError, redact } = require('./sources');
+const { inputArgs, friendlyError, redact, multicastState } = require('./sources');
 
 const safe = (s) => String(s || '').replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 60) || 'x';
 const stamp = (d) => d.toISOString().replace(/\..*$/, '').replace('T', '_').replace(/:/g, '-');
@@ -41,7 +41,10 @@ class Recorder {
     const label = this.manager.resolveLabel(cam, variant);
     const src = cam.sources.find((s) => s.label === label);
     const settings = this.store.settings;
-    const input = await inputArgs(src, settings, { key: `${cam.id}/${label}`, lowLatency: false });
+    const key = `${cam.id}/${label}`;
+    // A recording has no fallback of its own, so it joins multicast only
+    // when that stream is known to be getting a picture over it.
+    const input = await inputArgs(src, settings, { key, lowLatency: false, multicast: multicastState(key) === 'ok' ? undefined : false });
     const info = this.manager.variantInfo(cam.id, label) || {};
     const encode = src.transcode || input.needsEncode || (info.videoCodec && !['h264', 'hevc'].includes(info.videoCodec));
     const started = new Date();

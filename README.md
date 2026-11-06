@@ -192,6 +192,48 @@ Pipeline settings (Settings → Streaming):
 back in. A UDP stream that shows no picture within about 8 s switches itself
 to TCP. To really use UDP, run with `network_mode: host` on Linux.
 
+### Multicast
+
+With RTSP multicast, a camera sends each stream **once** onto the network,
+and every receiver (LookyLooky, an NVR, another relay) joins it. A camera
+that several systems watch then encodes and sends one copy instead of one per
+connection. LookyLooky on its own already shares one camera connection among
+all of its viewers, so multicast pays off when **other** systems pull the
+same cameras too.
+
+- **Per camera:** Transport → *Multicast* (camera dialog, network scan).
+- **For all RTSP cameras:** Settings → Streaming → *RTSP multicast* → *Try
+  multicast for every RTSP camera*.
+- **Addresses from ONVIF:**
+  - ONVIF Discover shows each stream's multicast group, and fills in its
+    multicast RTSP address when it differs from the unicast one.
+  - For cameras already set up, use Settings → Streaming → *Look up
+    multicast on all cameras (ONVIF)*. It asks each camera on port 80 with
+    the login from its stream URL, and can switch the ones that offer it.
+  - API: `POST /api/multicast/lookup {"enable": true}`.
+- **cameras.xml:**
+  - per source: `transport="multicast"` and an optional
+    `multicast-url="rtsp://…"`;
+  - for all cameras: `<camera-settings multicast="prefer">`.
+
+**Multicast only reaches LookyLooky when its container is on the cameras'
+network:** a Linux host with `network_mode: host` (see `docker-compose.yml`),
+and switches that forward multicast. It never arrives on **Docker Desktop**
+(its VM sits behind NAT) or a bridged network.
+
+LookyLooky copes with that by itself:
+- **No picture over multicast within about 8 s:** the stream switches to
+  unicast (the source's own TCP/UDP setting).
+- **Stalls twice within 15 minutes while on multicast:** it also switches to
+  unicast. This is the usual symptom of a switch with IGMP snooping but no
+  IGMP querier.
+- **Either way,** that stream skips multicast for an hour. Recycle Cameras
+  retries it.
+- **Recordings** use multicast only once the live stream has proven it
+  works.
+- **Checking:** `/api/cameras` shows `delivery: "multicast"` or
+  `"unicast"` for each running stream, and the log line says which.
+
 `kill -HUP` on the server process re-reads cameras.json and layouts.json.
 
 ## Using it from another stack

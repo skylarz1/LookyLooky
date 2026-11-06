@@ -11,7 +11,7 @@ const path = require('path');
 const { sendJson, sendError, readJson, sse, sendFile, checkAuth } = require('./http-util');
 const { normaliseCamera, normaliseLayout, parseImport, slugify, defaultLayout, DATA_DIR } = require('./config');
 const { probe } = require('./probe');
-const { discover } = require('./onvif');
+const { discover, lookupMulticast, streamKey } = require('./onvif');
 const { scan } = require('./scan');
 const { redact, hostOf } = require('./sources');
 
@@ -66,7 +66,7 @@ function register(router, ctx) {
     return Promise.all(cam.sources.map(async (src) => {
       const r = await probe(src, store.settings, { key: `${cam.id}/${src.label}`, timeoutMs: 12000 });
       if (r.ok) manager.updateVariant(cam.id, src.label, { ...r, probedAt: Date.now() });
-      return { label: src.label, ok: r.ok, error: r.error || null, width: r.width || null, height: r.height || null, videoCodec: r.videoCodec || null, audioCodec: r.audioCodec || null };
+      return { label: src.label, ok: r.ok, error: r.error || null, note: r.note || null, multicast: !!r.multicast, width: r.width || null, height: r.height || null, videoCodec: r.videoCodec || null, audioCodec: r.audioCodec || null };
     }));
   }
 
@@ -135,17 +135,17 @@ function register(router, ctx) {
 
   async function batchOne(item, group, emit) {
     const key = item.key || item.ip;
-    const transport = item.transport === 'udp' ? 'udp' : 'tcp';
+    const transport = ['udp', 'multicast'].includes(item.transport) ? item.transport : 'tcp';
     let sources = Array.isArray(item.sources) && item.sources.length
-      ? item.sources.map((s) => ({ label: s.label, url: s.url, transport: s.transport || transport })) : null;
+      ? item.sources.map((s) => ({ label: s.label, url: s.url, transport: s.transport || transport, multicastUrl: s.multicastUrl })) : null;
     let note = null;
     if (!sources && item.user) {
       emit('item', { key, stage: 'discovering' });
       try {
         const d = await discover({ host: item.ip, port: item.onvifPort || 80, user: item.user, pass: item.pass });
         if (d.suggested.main) {
-          sources = [{ label: 'main', url: d.suggested.main, transport }];
-          if (d.suggested.sub) sources.push({ label: 'sub', url: d.suggested.sub, transport });
+          sources = [{ label: 'main', url: d.suggested.main, transport, multicastUrl: d.suggested.mainMulticast || undefined }];
+          if (d.suggested.sub) sources.push({ label: 'sub', url: d.suggested.sub, transport, multicastUrl: d.suggested.subMulticast || undefined });
         }
       } catch (err) {
         note = `ONVIF: ${err.message}`;
@@ -290,6 +290,53 @@ function register(router, ctx) {
     } catch (err) {
       sendJson(res, 200, { error: err.message, streams: [] });
     }
+  }));
+
+  /**
+   * Multicast addresses for cameras already set up, from ONVIF.  Body:
+   *   { ids?: [...] (default every camera with an RTSP stream), onvifPort?: 80,
+   *     enable?: false (true also switches the matched streams to transport 'multicast') }
+   * Stores each matched stream's multicast RTSP address (when it differs from
+   * the unicast one).  Answers { results: [{ id, error?, sources: [{label, matched, multicast, changed}] }] }.
+   */
+  router.post('/api/multicast/lookup', admin(async (req, res) => {
+    const b = await readJson(req);
+    const wanted = Array.isArray(b.ids) && b.ids.length ? new Set(b.ids.map(String)) : null;
+    const cams = store.cameras.filter((c) => (!wanted || wanted.has(c.id))
+      && c.sources.some((s) => s.type === 'rtsp'));
+    const port = Number(b.onvifPort) || 80;
+    const results = [];
+    let next = 0;
+    const worker = async () => {
+      while (next < cams.length) {
+        const cam = cams[next++];
+        const r = { id: cam.id, name: cam.name, sources: [] };
+        try {
+          const found = await lookupMulticast(cam, { port });
+          let changed = false;
+          const sources = cam.sources.map((src) => {
+            const f = found.sources.find((x) => x.label === src.label);
+            if (!f) return src;
+            const out = { ...src };
+            const mcUrl = f.multicast && f.multicast.rtspUrl;
+            // Stored only when it's a different stream address (credentials aside).
+            if (mcUrl && streamKey(mcUrl) !== streamKey(src.url) && mcUrl !== src.multicastUrl) { out.multicastUrl = mcUrl; changed = true; }
+            if (b.enable && f.multicast && src.transport !== 'multicast') { out.transport = 'multicast'; changed = true; }
+            r.sources.push({ label: src.label, matched: f.matched, profileName: f.profileName,
+              multicast: f.multicast ? { ...f.multicast, rtspUrl: f.multicast.rtspUrl ? redact(f.multicast.rtspUrl) : '' } : null,
+              changed: JSON.stringify(out) !== JSON.stringify(src) });
+            return out;
+          });
+          if (changed) manager.update(cam.id, { sources });
+        } catch (err) {
+          r.error = err.message;
+        }
+        results.push(r);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(6, cams.length) }, worker));
+    results.sort((a, b2) => store.cameras.findIndex((c) => c.id === a.id) - store.cameras.findIndex((c) => c.id === b2.id));
+    sendJson(res, 200, { results });
   }));
 
   router.get('/api/scan', admin(async (req, res, params, url) => {

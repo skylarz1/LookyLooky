@@ -35,7 +35,7 @@ const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
 const { Fmp4Parser } = require('./fmp4');
 const P = require('./protocol');
-const { inputArgs, friendlyError, redact, clearSession } = require('./sources');
+const { inputArgs, friendlyError, redact, clearSession, noteMulticast, MULTICAST_RETRY_MS } = require('./sources');
 
 const SOFT_CAP = 1.5 * 1024 * 1024;
 const HARD_CAP = 8 * 1024 * 1024;
@@ -73,8 +73,10 @@ class Pipeline extends EventEmitter {
       key: `${s.cameraId}/${s.label}`,
       slowProbe: s.slowProbe,
       forceTcp: s.forceTcp,
+      multicast: Date.now() < s.noMulticastUntil ? false : undefined,
       log: (m) => s.log(m),
     });
+    this.multicast = !!input.multicast;
     const probed = s.manager.variantInfo(s.cameraId, s.label);
     const transcode = src.transcode || input.needsEncode
       || (probed && probed.videoCodec && !['h264', 'hevc'].includes(probed.videoCodec));
@@ -95,7 +97,7 @@ class Pipeline extends EventEmitter {
       args.push('-map', input.audio, '-vn', '-sn', '-dn', '-c:a', 'pcm_mulaw', '-ar', String(PCM_RATE), '-ac', '1',
         '-f', 'mulaw', '-flush_packets', '1', 'pipe:4');
     }
-    s.log(`spawn ${redact(src.url)}${transcode ? ' (transcode h264)' : ''}${this.withAudio ? '' : ' (no audio)'}`);
+    s.log(`spawn ${redact(this.multicast ? (src.multicastUrl || src.url) : src.url)}${this.multicast ? ' (multicast)' : ''}${transcode ? ' (transcode h264)' : ''}${this.withAudio ? '' : ' (no audio)'}`);
 
     const proc = spawn(settings.ffmpeg.path || 'ffmpeg', args, {
       stdio: ['ignore', 'pipe', 'pipe', 'pipe', 'pipe'],
@@ -185,6 +187,8 @@ class StreamSession {
     this.audioAvailable = null;     // null = unknown; false once a pipeline proved there is none
     this.slowProbe = false;
     this.forceTcp = false;          // set when an RTSP/UDP source never produced a picture
+    this.noMulticastUntil = 0;      // set when multicast gave no picture or kept stalling
+    this.multicastStalls = [];      // stall times while on multicast (see _onExit)
 
     this.track = null;
     this.videoConfigMsg = null;
@@ -304,6 +308,32 @@ class StreamSession {
       this._spawn();
       return;
     }
+    // Multicast that never produced a picture: the group isn't reaching this
+    // container (Docker Desktop, a bridged network, a router that doesn't
+    // forward it).  Fall back to unicast TCP, and let the next starts of this
+    // stream skip multicast for a while (sources.js).
+    if (p.multicast && this.liveSince === 0 && !/rejected the username/.test(why)) {
+      this.noMulticastUntil = Date.now() + MULTICAST_RETRY_MS;
+      noteMulticast(`${this.cameraId}/${this.label}`, false);
+      this.log('no picture over multicast — switching this stream to unicast');
+      this._spawn();
+      return;
+    }
+    // Multicast that plays, then stalls, then plays again after a rejoin is
+    // the classic sign of a switch with IGMP snooping and no IGMP querier: it
+    // prunes the group a few minutes after each join.  Twice in 15 minutes and
+    // this stream goes back to TCP.
+    if (p.multicast && this.liveSince > 0 && /stopped sending video/.test(tail || '')) {
+      const now = Date.now();
+      this.multicastStalls = this.multicastStalls.filter((t) => now - t < 15 * 60 * 1000);
+      this.multicastStalls.push(now);
+      if (this.multicastStalls.length >= 2) {
+        this.noMulticastUntil = now + MULTICAST_RETRY_MS;
+        this.multicastStalls = [];
+        noteMulticast(`${this.cameraId}/${this.label}`, false);
+        this.log('multicast keeps stalling (no IGMP querier on the network?) — switching this stream to unicast');
+      }
+    }
     // RTSP over UDP that never produced a picture: almost always the return
     // path being blocked (Docker's bridged network, a firewall).  Retry the
     // same camera over TCP — every camera that does RTSP does TCP.
@@ -359,9 +389,9 @@ class StreamSession {
     if (!p || p.exited) return;
     const ff = this.manager.store.settings.ffmpeg;
     const now = Date.now();
-    const udpTry = this.source && this.source.transport === 'udp' && !this.forceTcp;
+    const udpTry = p.multicast || (this.source && this.source.transport === 'udp' && !this.forceTcp);
     if (this.state === 'starting' && now - this._startedAt > (udpTry ? 8000 : 25000)) {
-      this.log('no picture within 25 s — restarting');
+      this.log(`no picture within ${udpTry ? 8 : 25} s — restarting`);
       p.stderrTail += '\nOperation timed out';
       p.kill();
     } else if (this.state === 'live' && now - this.lastVideoAt > (ff.stallTimeoutMs || 10000)) {
@@ -438,6 +468,7 @@ class StreamSession {
       this.liveSince = Date.now();
       this.lastError = null;
       this.restarts = this.restarts.filter((t) => Date.now() - t < 60000);
+      if (p.multicast) noteMulticast(`${this.cameraId}/${this.label}`, true);
       this.manager.onSessionLive(this);
     }
     const msg = P.videoChunk(pts, isKey, data);
