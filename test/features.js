@@ -154,6 +154,61 @@ async function measureTones(p) {
     check('quality: no page errors', errors.length === 0, errors.join(' | '));
     await ctx.close();
   }
+  // ── 7. Per-pane speakers ──
+  {
+    const heard = (p) => p.evaluate(async (tones) => {
+      const panes = [...window.__claudiferGrid._panes.values()];
+      await new Promise((r) => setTimeout(r, 2500));
+      const clients = panes.map((x) => x._client).filter(Boolean);
+      const ctx = clients.find((c) => c._audioCtx)?._audioCtx;
+      if (!ctx) return [];
+      const an = ctx.createAnalyser(); an.fftSize = 16384; an.smoothingTimeConstant = 0.5;
+      for (const c of clients) c._audioGain?.connect(an);
+      await new Promise((r) => setTimeout(r, 1200));
+      const bins = new Float32Array(an.frequencyBinCount); an.getFloatFrequencyData(bins);
+      const hz = ctx.sampleRate / an.fftSize;
+      const at = (f) => Math.max(...[-2, -1, 0, 1, 2].map((d) => bins[Math.round(f / hz) + d]));
+      for (const c of clients) { try { c._audioGain?.disconnect(an); } catch {} }
+      return tones.filter((t) => at(t) > -70);
+    }, TONES);
+    const { p, ctx, errors } = await open('/cameras.html');
+    await p.selectOption('#layoutSelect', 'feat'); await p.waitForTimeout(5000);
+    // A clean slate: nothing focused, master muted.
+    await p.evaluate(() => { window.__claudiferGrid.setFocusedCamera(null, 1, true); });
+    const none = await heard(p);
+    check('speakers: nothing pressed → silent', none.length === 0, `heard ${JSON.stringify(none)}`);
+    for (const id of ['tone1', 'tone3']) { await p.hover(`#card-${id} .video-wrap`); await p.waitForTimeout(300); await p.click(`#card-${id} .speaker-btn`); }
+    const two = await heard(p);
+    const btn = await p.evaluate(() => ['tone0', 'tone1', 'tone2', 'tone3'].map((id) => document.querySelector(`#card-${id} .speaker-btn`).className).join(' | '));
+    check('speakers: two pane speakers → exactly those two cameras heard', JSON.stringify(two) === JSON.stringify([500, 900]), `heard ${JSON.stringify(two)}; buttons: ${btn}`);
+    // Master: unmute (focus none) then mute again → clears the pane speakers.
+    await p.click('#globalMuteBtn'); await p.click('#globalMuteBtn');
+    const cleared = await heard(p);
+    check('speakers: top mute button silences pane speakers too', cleared.length === 0, `heard ${JSON.stringify(cleared)}`);
+    // Normal single-focus behaviour still intact: focus tone2 + unmute master → only tone2.
+    await p.evaluate(() => { window.__claudiferGrid.setFocusedCamera('tone2', 1, false); });
+    const focus = await heard(p);
+    check('speakers: default single focused audio unchanged', JSON.stringify(focus) === JSON.stringify([700]), `heard ${JSON.stringify(focus)}`);
+    // Focus + one extra.
+    await p.hover('#card-tone0 .video-wrap'); await p.waitForTimeout(300); await p.click('#card-tone0 .speaker-btn');
+    const plus = await heard(p);
+    check('speakers: focused camera plus a pane speaker', JSON.stringify(plus) === JSON.stringify([300, 700]), `heard ${JSON.stringify(plus)}`);
+    check('speakers: no page errors', errors.length === 0, errors.join(' | '));
+    await ctx.close();
+  }
+  // ── 8. Wall: a preview's speaker promotes it to full motion and plays it with the main pane ──
+  {
+    const { p, ctx, errors } = await open('/wall.html?layout=feat', { viewport: { width: 1024, height: 768 } });
+    const main = await p.evaluate(() => window.__claudiferWall.selectedID);
+    const prev = ['tone1', 'tone2', 'tone3'].find((id) => id !== main);
+    const modeBefore = await p.evaluate((id) => window.__claudiferWall.grid.getPane(id).effectiveMode, prev);
+    await p.hover(`#card-${prev} .video-wrap`); await p.waitForTimeout(300);
+    await p.click(`#card-${prev} .speaker-btn`); await p.waitForTimeout(4000);
+    const st = await p.evaluate((id) => { const g = window.__claudiferWall.grid; const x = g.getPane(id); return { mode: x.effectiveMode, audible: g.isPaneAudible(id), muted: x._client?._muted }; }, prev);
+    check('wall: preview speaker → full motion and audible', modeBefore === 'thumbnail' && st.mode === 'webcodecs' && st.audible && st.muted === false, JSON.stringify({ modeBefore, ...st }));
+    check('wall: no page errors', errors.length === 0, errors.join(' | '));
+    await ctx.close();
+  }
   await browser.close();
   const failed = results.filter((x) => !x).length;
   console.log(`\n${results.length - failed}/${results.length} checks passed`);

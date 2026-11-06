@@ -29,6 +29,12 @@
  *      default), 'fullscreen' (High only fullscreen / 1x1), 'large' (also High
  *      when the pane is at least mainMinWidth device pixels wide), 'main'.
  *
+ * Audio: one FOCUSED pane follows the page's master mute / volume (the
+ * dashboard's top speaker button, the wall's main pane).  Each pane also has
+ * its own speaker button, which adds that camera on top — any number at
+ * once, at the master volume, whatever the master mute says.  Muting the
+ * master silences everything and clears those extras.
+ *
  * LookyLooky additions: `fullMotion: false` builds a thumbnail-only grid for
  * browsers without WebCodecs (an insecure origin, an old browser), so the
  * board degrades to JPEG panes instead of going black; CameraGrid.destroy();
@@ -303,6 +309,7 @@ export class CameraPane {
   get variantTagId() { return `${this.idPrefix}vt-${this.cameraId}`; }
   get zoomBadgeId()  { return `${this.idPrefix}zb-${this.cameraId}`; }
   get qualityCtlId() { return `${this.idPrefix}qc-${this.cameraId}`; }
+  get speakerBtnId() { return `${this.idPrefix}sp-${this.cameraId}`; }
   get element()      { return document.getElementById(this.cardId); }
 
   // ── HTML construction ─────────────────────────────────────────────
@@ -337,6 +344,7 @@ export class CameraPane {
                      max-width:calc(100% - 16px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
                      border-radius:4px;pointer-events:none;z-index:2;">Connecting…</div>
          <button type="button" class="zoom-badge" id="${this.zoomBadgeId}" title="Reset zoom" style="display:none;"></button>
+         <button type="button" class="speaker-btn" id="${this.speakerBtnId}" style="display:none;"></button>
          <div class="quality-ctl" id="${this.qualityCtlId}" style="display:none;">
            <button type="button" class="quality-btn" data-q="toggle"></button><button type="button" class="quality-auto" data-q="auto" title="Back to automatic quality">A</button>
          </div>`;
@@ -381,6 +389,7 @@ export class CameraPane {
       }, true);
       this._bindZoom(wrap, el);
       this._bindQuality(wrap, el);
+      this._bindSpeaker(wrap);
       wrap.addEventListener('click',    ()  => this.onFocusRequest?.(this.cameraId));
       wrap.addEventListener('dblclick', (e) => this.onDblClick?.(this.slotIndex, e));
     }
@@ -475,7 +484,7 @@ export class CameraPane {
       quality,
       renderer: new CanvasVideoRenderer(canvas),
       bufferMs: this._bufferMs,
-      muted:    isFocal ? (audio?.muted ?? false) : true,
+      muted:    this.grid ? !this.grid.isPaneAudible(this.cameraId) : (isFocal ? (audio?.muted ?? false) : true),
       volume:   audio?.volume ?? 1,
       onStatus,
       onFirstFrame,
@@ -772,6 +781,7 @@ export class CameraPane {
    *  migration without opening each camera's admin UI. */
   _updateVariantTag() {
     this._updateQualityControl();
+    this._updateSpeakerButton();
     const el = document.getElementById(this.variantTagId);
     if (!el) return;
     if (this.mode === 'thumbnail') {
@@ -988,6 +998,18 @@ export class CameraPane {
     return labels.has('main') && labels.has('sub');
   }
 
+  _bindSpeaker(wrap) {
+    wrap.addEventListener('click', (e) => {
+      if (!e.target.closest?.('.speaker-btn')) return;
+      e.stopPropagation(); e.stopImmediatePropagation(); e.preventDefault();
+      if (!this.grid) return;
+      if (!this.grid.isPaneAudible(this.cameraId)) { this.grid.setPaneAudio(this.cameraId, true); return; }
+      if (this.grid.hasPaneAudio(this.cameraId)) this.grid.setPaneAudio(this.cameraId, false);
+      // Still heard: it is the focused pane, so this is the master mute.
+      if (this.grid.isPaneAudible(this.cameraId)) this.grid.onFocalMuteRequest?.(this.cameraId);
+    }, true);
+  }
+
   _bindQuality(wrap, el) {
     wrap.addEventListener('click', (e) => {
       const b = e.target.closest?.('.quality-ctl button');
@@ -1130,13 +1152,45 @@ export class CameraPane {
     // Optional calls: a thumbnail-tier client has no audio graph at all.  A
     // focused pane is always promoted to full motion by the grid's re-rank,
     // so this is only ever a no-op on the way past.
+    // Audible when it is the focused pane and the master is unmuted, or when
+    // its own speaker button is on.
+    const extra = !!this.grid?.hasPaneAudio(this.cameraId);
+    const audible = (isFocal && !(muted ?? false)) || extra;
+    this._updateSpeakerButton(audible);
     if (!this._client) return;
-    if (isFocal) {
-      this._client.setVolume?.(volume ?? 1);
-      this._client.setMuted?.(muted ?? false);
-    } else {
-      this._client.setMuted?.(true);
-    }
+    this._client.setVolume?.(volume ?? this.grid?._audio?.volume ?? 1);
+    this._client.setMuted?.(!audible);
+  }
+
+  /** Show/refresh this pane's speaker button.  `audible` = currently heard. */
+  _updateSpeakerButton(audible) {
+    const b = document.getElementById(this.speakerBtnId);
+    if (!b) return;
+    const vs = this.camera?.variants || [];
+    // Hide it only when the camera is known to have no audio track.
+    const knownSilent = vs.length > 0 && vs.every((v) => v.videoCodec && !v.audioCodec);
+    const show = this.camera?.status === 'running' && !!this.grid && !knownSilent;
+    b.style.display = show ? '' : 'none';
+    if (!show) return;
+    if (audible === undefined) audible = this.grid.isPaneAudible(this.cameraId);
+    const extra = this.grid.hasPaneAudio(this.cameraId);
+    b.classList.toggle('on', audible);
+    b.classList.toggle('extra', extra);
+    b.innerHTML = audible ? CameraPane.ICON_SOUND : CameraPane.ICON_MUTED;
+    b.title = audible
+      ? (extra ? 'Playing this camera too — click to turn it off' : 'This is the camera being listened to — click to mute')
+      : 'Listen to this camera too';
+  }
+
+  static get ICON_SOUND() {
+    return '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
+      + '<polygon points="4 7 8 7 13 3 13 17 8 13 4 13" fill="currentColor" stroke="none"/>'
+      + '<path d="M15.5 7.5a3.5 3.5 0 0 1 0 5"/><path d="M17.5 5.5a6 6 0 0 1 0 9"/></svg>';
+  }
+  static get ICON_MUTED() {
+    return '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
+      + '<polygon points="4 7 8 7 13 3 13 17 8 13 4 13" fill="currentColor" stroke="none"/>'
+      + '<line x1="15" y1="8" x2="19" y2="12"/><line x1="19" y1="8" x2="15" y2="12"/></svg>';
   }
 }
 
@@ -1179,6 +1233,11 @@ export class CameraGrid {
     this._layout    = null;
     this._cameras   = [];
     this._audio     = { focal: null, volume: 1, muted: true };
+    // Panes whose own speaker button is on — heard in addition to the focal one.
+    this._extraAudio = new Set();
+    // Host hook: the speaker on the focused pane was clicked off.  The host
+    // should mute its master control (the dashboard's top button, the wall's).
+    this.onFocalMuteRequest = null;
 
     // featuredSlot → stored slot currently displayed in it.  Display state
     // only — see computeMultiDisplayOrder; `_layout.slots` is never touched.
@@ -1296,6 +1355,7 @@ export class CameraGrid {
     this._audio = { focal: cameraId, volume, muted };
     if (prev && prev !== cameraId) this._panes.get(prev)?.setFocalStream(false);
     if (cameraId) this._panes.get(cameraId)?.setFocalStream(true, volume, muted);
+    for (const id of this._extraAudio) if (id !== cameraId) this._syncPaneAudio(id);   // volume follows the master
     // On a featured layout the large panel IS the focus panel, so the focused
     // camera moves into it.  Display-only: `_layout.slots` is untouched and
     // nothing is persisted.  No-op on plain grids (no featured slot).
@@ -1309,6 +1369,39 @@ export class CameraGrid {
     // fires where the pick actually differs from what's subscribed.
     for (const pane of this._panes.values()) pane._maybeSwitchVariant?.();
   }
+
+  // ── Per-pane audio ───────────────────────────────────────────────
+
+  hasPaneAudio(cameraId) { return this._extraAudio.has(cameraId); }
+
+  isPaneAudible(cameraId) {
+    return (this._audio.focal === cameraId && !this._audio.muted) || this._extraAudio.has(cameraId);
+  }
+
+  /** Turn one pane's own speaker on or off. */
+  setPaneAudio(cameraId, on) {
+    if (on) this._extraAudio.add(cameraId); else this._extraAudio.delete(cameraId);
+    this._syncPaneAudio(cameraId);
+    // An audible pane must be full motion (a thumbnail has no sound): re-rank pins it.
+    this._rerank();
+  }
+
+  /** Every pane speaker off (the master mute does this). */
+  clearPaneAudio() {
+    const ids = [...this._extraAudio];
+    this._extraAudio.clear();
+    for (const id of ids) this._syncPaneAudio(id);
+    this._rerank();
+  }
+
+  _syncPaneAudio(cameraId) {
+    const pane = this._panes.get(cameraId);
+    if (!pane) return;
+    const a = this._audio;
+    pane.setFocalStream(a.focal === cameraId, a.volume, a.muted);
+  }
+
+  _syncAllAudio() { for (const id of this._panes.keys()) this._syncPaneAudio(id); }
 
   // ── Quality ──────────────────────────────────────────────────────
 
@@ -1509,7 +1602,7 @@ export class CameraGrid {
         area:   rect ? rect.width * rect.height : 0,
         slot:   pane.slotIndex,
         pinned: (!!document.fullscreenElement && document.fullscreenElement === el) ||
-                this._audio.focal === pane.cameraId,
+                this._audio.focal === pane.cameraId || this._extraAudio.has(pane.cameraId),
       });
     }
     // effectiveMode throughout: a pane mid-transition reports the tier that's
@@ -1786,6 +1879,9 @@ export class CameraGrid {
         setTimeout(() => pane.startStream(this._audio), 0);
       }
     }
+
+    // A pane speaker for a camera no longer on this grid goes away.
+    for (const id of [...this._extraAudio]) if (!this._panes.has(id)) this._extraAudio.delete(id);
 
     // Apply the decode budget before any deferred startStream fires: panes
     // are built in webcodecs mode, and this synchronously demotes the

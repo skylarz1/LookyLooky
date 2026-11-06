@@ -82,15 +82,30 @@ variant tag turns amber). It retries High after 30 s of calm.
 
 ## Audio
 
-- Click (or tap) a pane to make it the audible one. The speaker button and
-  the volume slider control it.
+- **Default: one camera at a time.** Click (or tap) a pane to make it the
+  focused one; the top speaker button and volume slider control it. On the
+  wall, the main camera is the focused one and the wall's speaker controls
+  it.
+- **Per-pane speakers add more cameras.** Hover a pane (tap on iPad) for its
+  speaker button, bottom-left:
+  - **Turn it on:** that camera plays as well as the focused one, at the
+    volume slider's level, even while the top button is muted. Its button
+    stays lit (filled orange) while on.
+  - **Turn it off:** that camera stops. On the focused camera, the button
+    does the same as the top mute button.
+  - **Top mute button:** silences everything and switches every pane speaker
+    off. Unmuting brings back only the focused camera.
+  - **Thumbnail panes:** turning on a speaker makes the pane full live video
+    (a thumbnail has no sound).
+  - **View-only page:** it has no focused camera, so pane speakers are its
+    audio.
+  - **Not remembered:** pane speakers reset after a reload, so a screen never
+    starts talking on its own.
 - **iPad 6th gen and other Safari before 26:** they have no Opus decoder, so
   the server sends them PCM instead. Audio works the same.
-- **Several cameras at once works.** Every pane has its own audio graph, mixed
-  by the browser. `test/features.js` plays four cameras with four different
-  tones and checks all four are present in the output, on both the Opus and
-  the PCM (iPad) paths. The dashboard UI currently makes one pane audible at a
-  time.
+- **Mixing:** every pane has its own audio graph, mixed by the browser.
+  `test/features.js` checks with four cameras on four tones that exactly the
+  expected cameras are heard, on both the Opus and the PCM (iPad) paths.
 - **Muted panes are sent no audio at all**, so they cost no bandwidth.
 
 ## How the low latency is achieved

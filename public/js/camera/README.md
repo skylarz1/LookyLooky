@@ -47,8 +47,15 @@ browser).
 - **Output:** both paths feed a persistent AudioWorklet → gain → the
   page-wide `AudioContext`.
 - **Many at once:** any number of panes can be audible together; their
-  graphs mix in the shared context (see `test/features.js`). The grid's own
-  UI follows one *focused* pane.
+  graphs mix in the shared context (see `test/features.js`).
+  - **Focused pane:** heard when the master is unmuted (`setFocusedCamera`).
+  - **Pane speakers:** each pane's own speaker (`grid.setPaneAudio(id, on)`)
+    adds that pane at the master volume, regardless of the master mute. An
+    audible pane is pinned to full motion.
+  - **Clearing:** `grid.clearPaneAudio()` switches every pane speaker off
+    (hosts call it on master mute).
+  - **Host hook:** `grid.onFocalMuteRequest` is called when the focused
+    pane's own speaker is clicked off, so the host can mute its master.
 - **Muted panes are not sent audio:** `setMuted()` tells the server.
 - **iOS unlock:** happens on touchend/pointerup, and
   `navigator.audioSession.type = 'playback'` keeps the ringer switch from
