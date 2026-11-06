@@ -10,3 +10,5 @@ config/*
 !config/*.example.json
 import/*
 !import/README.txt
+# Per-machine settings (LAN IP, time zone, admin password): docker compose merges it automatically.
+docker-compose.override.yml

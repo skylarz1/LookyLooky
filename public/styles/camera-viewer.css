@@ -459,3 +459,21 @@
 .camera-card .quality-ctl .quality-auto { display: none; min-width: 26px; padding: 3px 5px; }
 .camera-card .quality-ctl.manual .quality-auto { display: inline-block; }
 .camera-card .quality-ctl.manual .quality-btn { box-shadow: 0 0 0 2px rgba(242, 113, 28, 0.55); }
+
+/* ─── Per-pane speaker ───
+   Bottom-left, shown on hover / tap like the quality control — and always
+   while the pane is audible, so it is obvious which cameras are playing. */
+.camera-card .speaker-btn {
+  position: absolute; left: 8px; bottom: 36px; z-index: 4;
+  width: 32px; height: 28px; display: flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.65); color: #fff; border: 1px solid rgba(255,255,255,0.3);
+  border-radius: 4px; cursor: pointer; padding: 0;
+  opacity: 0; pointer-events: none; transition: opacity 0.15s;
+}
+.camera-card .speaker-btn svg { width: 16px; height: 16px; }
+.camera-card:hover .speaker-btn,
+.camera-card.name-hover .speaker-btn,
+.camera-card.touch-reveal .speaker-btn,
+.camera-card .speaker-btn.on { opacity: 1; pointer-events: auto; }
+.camera-card .speaker-btn.on { border-color: var(--accent); color: var(--accent); }
+.camera-card .speaker-btn.on.extra { background: var(--accent); color: #fff; }

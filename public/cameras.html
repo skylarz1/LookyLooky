@@ -2261,6 +2261,8 @@
     /** Toggle mute — independent of the volume slider position. */
     function toggleGlobalMute() {
       globalMuted = !globalMuted;
+      // The master mute silences everything: pane speakers switch off too.
+      if (globalMuted) cameraGrid?.clearPaneAudio();
       savePrefs({ globalMuted });
       _applyGlobalAudio();
       _syncGlobalMuteBtn();
@@ -2331,7 +2333,11 @@
     }
 
     function _applyGlobalAudio() {
-      if (!audioEnabledStream) return;
+      if (!audioEnabledStream) {
+        // No focused pane, but pane speakers still follow the volume slider.
+        if (cameraGrid) { cameraGrid._audio.volume = globalVolume; cameraGrid._syncAllAudio(); }
+        return;
+      }
       cameraGrid?.setFocusedCamera(
         audioEnabledStream,
         globalVolume,
@@ -3922,6 +3928,8 @@
       cameraGrid.buildEmptySlot = (slotIndex) => buildEmptySlotHTML(slotIndex);
       cameraGrid.onPaneFocusRequest = (cameraId) => setFocalStream(cameraId);
       cameraGrid.onPaneDblClick     = (slotIndex, e) => onStreamDblClick(e, slotIndex);
+      // The speaker on the focused pane switched off = the top mute button.
+      cameraGrid.onFocalMuteRequest = () => { if (!globalMuted) toggleGlobalMute(); };
       cameraGrid.onSlotDragStart    = (slotIndex, e) => onSlotDragStart(e, slotIndex);
       cameraGrid.onSlotDragEnd      = (e)            => _dragEnd();
       cameraGrid.onSlotDragOver     = (slotIndex, e) => onSlotDragOver(e);

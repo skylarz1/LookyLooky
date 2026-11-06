@@ -1,0 +1,28 @@
+# A throwaway LookyLooky for development and the browser tests.
+#
+#   docker compose -f docker-compose.dev.yml -p lookylooky-dev up -d --build
+#   node test/e2e.js https://localhost:18443
+#   node test/features.js https://localhost:18443 http://localhost:18080
+#   docker compose -f docker-compose.dev.yml -p lookylooky-dev down -v
+#
+# Separate project name, ports and data from the real one (docker-compose.yml),
+# no seed import: it boots with only the built-in Test Pattern camera. The tests
+# ADD cameras and layouts — never point them at the real instance.
+
+services:
+  lookylooky-dev:
+    build: .
+    image: lookylooky:dev
+    container_name: lookylooky-dev
+    ports:
+      - "18080:8080"
+      - "18443:8443"
+    environment:
+      LOOKY_SEED_DIR: /nonexistent
+      LOOKY_DEMO: "1"
+      LOOKY_HOSTNAMES: "localhost"
+    volumes:
+      - lookylooky-dev-data:/data
+
+volumes:
+  lookylooky-dev-data:

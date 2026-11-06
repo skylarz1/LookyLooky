@@ -6,10 +6,17 @@
   "private": true,
   "scripts": {
     "start": "node server/index.js",
-    "test": "node test/e2e.js && node test/features.js"
+    "test": "node test/e2e.js https://localhost:18443 && node test/features.js https://localhost:18443 http://localhost:18080",
+    "dev:up": "docker compose -f docker-compose.dev.yml -p lookylooky-dev up -d --build",
+    "dev:down": "docker compose -f docker-compose.dev.yml -p lookylooky-dev down -v"
   },
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "playwright": "1.63.0"
   }
 }

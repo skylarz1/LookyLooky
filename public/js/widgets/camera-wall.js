@@ -384,6 +384,9 @@ export default class CameraWall extends Widget {
         // WatchForSelection, bound once in the constructor.
         this.grid.buildEmptySlot = (i) => this.BuildEmptySlot(i);
 
+        // The speaker on the main pane switched off = the wall's mute button.
+        this.grid.onFocalMuteRequest = () => { if (!this.muted) this.ToggleMuted(); };
+
         // options.quality: "high" / "low" pins the whole wall.
         const q = String(this.options.quality || "").toLowerCase();
         if (q === "high" || q === "main") this.grid.setQualityOverride("main");
@@ -605,6 +608,9 @@ export default class CameraWall extends Widget {
 
     ToggleMuted() {
         this.muted = !this.muted;
+
+        // Muting the wall silences everything, pane speakers included.
+        if (this.muted && this.grid != null) this.grid.clearPaneAudio();
 
         try { localStorage.setItem("claudifer-wall-muted", this.muted ? "1" : "0"); }
         catch (err) { /* private window, or storage off */ }
