@@ -428,6 +428,14 @@
       line-height: 1;
     }
     .sidebar-group-label:hover .sidebar-group-edit-btn { display: flex; align-items: center; }
+    /* Groups listed after the layouts (cameras in no layout): set apart. */
+    .sidebar-group-label.unplaced {
+      font-weight: 600;
+      font-style: italic;
+      opacity: 0.8;
+      border-top: 1px dashed var(--border);
+      margin-top: 6px;
+    }
     .sidebar-group-edit-btn:hover { color: var(--text); background: rgba(255,255,255,0.1); }
     .sidebar-cam-item {
       display: flex;
@@ -1886,7 +1894,8 @@
 
       // Bucket cameras under their group label.  Named groups sort
       // alphabetically; ungrouped cameras trail behind under `tailLabel`.
-      const _groupSections = (camList, tailLabel) => {
+      // `prefix` marks the labels as groups when they share a list with layouts.
+      const _groupSections = (camList, tailLabel, prefix = '') => {
         if (camList.length === 0) return '';
         const buckets = new Map();
         for (const cam of camList) {
@@ -1899,7 +1908,7 @@
 
         let out = '';
         for (const key of order) {
-          out += `<div class="sidebar-group-label"><span>${key ? _scanEsc(key) : tailLabel}</span></div>`;
+          out += `<div class="sidebar-group-label${prefix ? ' unplaced' : ''}"><span>${prefix}${key ? _scanEsc(key) : tailLabel}</span></div>`;
           for (const cam of buckets.get(key)) out += _camItem(cam);
         }
         return out;
@@ -1954,11 +1963,13 @@
 
       // Cameras not slotted into any layout, still bucketed by group so a
       // venue's unplaced cameras arrive in usable clumps rather than one list.
+      // Their labels say so: a bare group name here reads as a layout that
+      // the layout picker doesn't have.
       const unassigned = cameras
         .filter(c => !assignedIds.has(c.id))
         .sort((a, b) => a.name.localeCompare(b.name));
 
-      html += _groupSections(unassigned, 'Unassigned');
+      html += _groupSections(unassigned, 'No group', 'Not in a layout · ');
 
       if (!html) html = '<div style="padding:12px;font-size:12px;color:var(--text-dim);">No cameras</div>';
       sidebar.innerHTML = modeBar + html;
