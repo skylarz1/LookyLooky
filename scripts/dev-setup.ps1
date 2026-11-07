@@ -16,7 +16,9 @@
        and time zone, if it doesn't exist yet.
     5. Adds the Windows Firewall rule for ports 8080/8443 (when run as admin).
     6. Builds and starts the real instance (docker compose up -d --build) and
-       waits until it answers.
+       waits until it answers. If a LookyLooky started from another folder is
+       already running, it stops and explains instead (-ReplaceExisting to go
+       ahead anyway).
     7. Unless -SkipTests: starts a separate throwaway instance
        (docker-compose.dev.yml, ports 18080/18443, test pattern only), runs
        test\e2e.js and test\features.js against it in Playwright Chromium,
@@ -31,7 +33,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$RepoDir = (Split-Path -Parent $PSScriptRoot),
+    [string]$RepoDir = "",
     [string]$RepoUrl = "https://github.com/skylarz1/LookyLooky.git",
     [string]$Branch = "auto",
     [string]$ConfigFrom = "",
@@ -39,13 +41,19 @@ param(
     [string]$TimeZone = "",
     [switch]$SkipTests,
     [switch]$SkipProduction,
+    [switch]$ReplaceExisting,
     [switch]$KeepDevInstance
 )
 
 $ErrorActionPreference = "Stop"
-# When run from a downloaded copy outside the repo, default to C:\LookyLooky.
-if (-not (Test-Path (Join-Path $RepoDir "docker-compose.yml")) -and -not (Test-Path (Join-Path $RepoDir ".git"))) {
-    if ($PSBoundParameters.ContainsKey("RepoDir") -eq $false) { $RepoDir = "C:\LookyLooky" }
+# Windows PowerShell 5.1 leaves $PSScriptRoot empty inside param() defaults,
+# so the default repo folder (the script's parent) is worked out here.
+if (-not $RepoDir) {
+    $RepoDir = Split-Path -Parent $PSScriptRoot
+    # When run from a downloaded copy outside the repo, default to C:\LookyLooky.
+    if (-not (Test-Path (Join-Path $RepoDir "docker-compose.yml")) -and -not (Test-Path (Join-Path $RepoDir ".git"))) {
+        $RepoDir = "C:\LookyLooky"
+    }
 }
 
 function Step($text) { Write-Host ""; Write-Host "==> $text" -ForegroundColor Cyan }
@@ -167,6 +175,11 @@ $override = Join-Path $RepoDir "docker-compose.override.yml"
 if (Test-Path $override) {
     Ok "docker-compose.override.yml already exists - leaving it as it is:"
     Get-Content $override | ForEach-Object { Info $_ }
+    # The address the iPads use is the first name in LOOKY_HOSTNAMES.
+    if (-not $LanIp) {
+        $m = Select-String -Path $override -Pattern 'LOOKY_HOSTNAMES:\s*"?([0-9.]+)' | Select-Object -First 1
+        if ($m) { $LanIp = $m.Matches[0].Groups[1].Value }
+    }
 } else {
     if (-not $LanIp) {
         $conf = Get-NetIPConfiguration |
@@ -246,6 +259,20 @@ foreach ($net in $publicNets) {
 # ---------------------------------------------------------------------------
 if (-not $SkipProduction) {
     Step "Building and starting LookyLooky (first build takes a few minutes)"
+    # A LookyLooky started from another folder (an older copy, an extracted
+    # zip) uses the same container name and ports, and the same data volume
+    # when the folder has the same name: "compose up" would replace it.
+    $labelsJson = Capture "docker" @("inspect", "--format", "{{json .Config.Labels}}", "lookylooky")
+    if ($labelsJson) {
+        $otherDir = (($labelsJson -join "") | ConvertFrom-Json).'com.docker.compose.project.working_dir'
+        if ($otherDir -and ($otherDir.TrimEnd('\') -ne (Resolve-Path $RepoDir).Path.TrimEnd('\')) -and -not $ReplaceExisting) {
+            Warn "A LookyLooky started from $otherDir is already running on this PC."
+            Info "Starting this copy would replace it: same container name and ports (8080/8443)."
+            Info "To replace it, back up its data first if you want to keep a copy, then run this again with -ReplaceExisting."
+            Info "To leave it alone and only run the tests, run this again with -SkipProduction."
+            throw "Stopped so the running LookyLooky is not replaced."
+        }
+    }
     $volume = Capture "docker" @("volume", "ls", "-q", "--filter", "name=lookylooky-data")
     if ($volume) { Info "Existing data volume found - config\ files are NOT re-imported (that only happens on first boot)." }
     Exec "docker" @("compose", "up", "-d", "--build")
@@ -268,8 +295,11 @@ if (-not $SkipTests) {
     if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
         Warn "Node.js isn't installed - skipping the tests. Install Node 20+ (https://nodejs.org) to run them."
     } else {
-        Exec "npm" @("ci", "--no-audit", "--no-fund")
-        Exec "npx" @("playwright", "install", "chromium")
+        # npm.cmd / npx.cmd, not npm / npx: those resolve to npm.ps1, which
+        # re-parses the caller's command line ($MyInvocation.Line) and so sees
+        # Exec's "& $File @Arguments" instead of the real arguments.
+        Exec "npm.cmd" @("ci", "--no-audit", "--no-fund")
+        Exec "npx.cmd" @("playwright", "install", "chromium")
         Exec "docker" @("compose", "-f", "docker-compose.dev.yml", "-p", "lookylooky-dev", "up", "-d", "--build")
         $failed = $false
         try {

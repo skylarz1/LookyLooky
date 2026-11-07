@@ -97,9 +97,10 @@ test/e2e.js               browser smoke test     test/features.js  multi-audio, 
   mu-law. Don't gate the video tier on `AudioDecoder`.
 - **The audio unlock listens to `touchend`/`pointerup`.** iOS does not count
   `touchstart` as activation.
-- **RTSP over UDP falls back to TCP automatically.** Docker Desktop's bridged
-  network blocks the UDP return path, and host networking isn't an option on
-  Windows.
+- **RTSP over UDP falls back to TCP automatically.** Bridged networks can
+  block the UDP return path, and host networking isn't an option on
+  Windows. (On the owner's Docker Desktop, Lobby1 did play over UDP; keep the
+  fallback for the setups where it doesn't.)
 - **Zoom state is stored as fractions of the pane**, so resizes keep the
   region. It resets whenever a pane changes position (featured swap,
   drag-drop, wall main change, fullscreen focus).
@@ -127,7 +128,28 @@ test/e2e.js               browser smoke test     test/features.js  multi-audio, 
 - **UDP→TCP fallback fires** (`no picture over UDP — switching this stream to
   TCP` for Lobby1). The camera itself was unreachable from the cloud.
 - **`scripts/dev-setup.ps1` parses** (PowerShell 7 parser) and is ASCII only.
-  It has not been executed on Windows.
+
+## Verified on the owner's Windows 11 laptop (2026-11-06, Docker Desktop)
+
+- **`scripts/dev-setup.ps1` runs end to end on Windows PowerShell 5.1**
+  after two fixes: `$PSScriptRoot` is empty in `param()` defaults on 5.1, and
+  `npm`/`npx` must be called as `npm.cmd`/`npx.cmd` (`npm.ps1` re-parses the
+  caller's command line). Build, start, `e2e.js` 13/13, `features.js` 22/22.
+- **It would silently replace a LookyLooky started from another folder** of
+  the same name (same project, container, volume, ports). It now stops and
+  says so unless `-ReplaceExisting`.
+- **All 35 real cameras play over unicast TCP** through Docker Desktop,
+  including cam-10/cam-26 (`/video/livemedia`), cam-28 (main only) and
+  cam-29 to cam-34 (`%21` passwords). Lobby1 plays over **UDP** (no TCP
+  fallback was needed).
+- **Load, all 35 streams running:** about 1.5 CPU cores and 760 MB for the
+  whole container; each FFmpeg about 40 MB resident and 4% of one core
+  (stream copy, no transcode).
+- **A camera-network outage** (the laptop's LAN cable out from 2:00 AM ET):
+  the previous build kept retrying every stream about every 30 s for 18
+  hours (1,000+ restarts each) with "The camera did not answer in time". The
+  owner saw stalled-looking panes and asked for a clear network error
+  instead.
 
 Reading `/api/cameras`: `status: running` means *enabled*, not *connected*.
 Streams start on demand, and `lastError` only shows while a stream is
@@ -136,21 +158,10 @@ retrying (someone is watching it). To check a camera, open it, or fetch
 
 ## Not verified yet (do these first on the owner's hardware)
 
-1. **Docker Desktop on Windows:** the first `docker compose up --build`
-   there, and `scripts/dev-setup.ps1` run end to end on Windows PowerShell
-   5.1.
-2. **Real cameras:** never connected.
-   - Most are Dahua-style `/cam/realmonitor` URLs; cam-10 and cam-26 use
-     `/video/livemedia`.
-   - cam-29 to cam-34 (`%21` passwords): FFmpeg decodes them (above). If
-     login still fails, the password itself is wrong.
-   - Lobby1 is a UniFi Protect stream (`192.168.1.6:7447`) configured as
-     UDP. Check that the TCP retry plays.
-3. **A real iPad 6th gen:** PCM audio, pinch zoom, the HQ/LQ and speaker
+1. **A real iPad 6th gen:** PCM audio, pinch zoom, the HQ/LQ and speaker
    buttons on tap, the certificate install flow. Tests ran in headless
    Chromium with `AudioDecoder` removed to simulate it.
-4. **Load with 35 cameras:** CPU and RAM per FFmpeg, and how many
-   simultaneous RTSP sessions each camera model allows.
+2. **How many simultaneous RTSP sessions each camera model allows.**
 
 ## Backlog / ideas
 
