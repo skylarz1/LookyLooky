@@ -55,6 +55,7 @@ config/                   first-boot seed. Real cameras.xml / camera-layouts.xml
                           never commit them. Only *.example.xml are tracked.
 test/e2e.js               browser smoke test     test/features.js  multi-audio, zoom, quality, per-pane speakers
 test/onvif.js             fake ONVIF camera: multicast discovery/lookup, FFmpeg args, fallback memory (no instance needed)
+test/network.js           unreachable cameras: the TCP knock, STREAM_PROBLEM, wait-then-restart (no instance needed)
 ```
 
 ## Rules
@@ -117,13 +118,37 @@ test/onvif.js             fake ONVIF camera: multicast discovery/lookup, FFmpeg 
   - `multicastUrl` is only for cameras whose multicast RTSP address
     differs. Most negotiate multicast on the normal URL in SETUP.
   - Not when the camera doesn't answer on its RTSP port at all
-    (`reachable()`): an unplugged camera is not a multicast failure.
+    (`reachable()`): an unplugged camera is not a multicast failure. The
+    UDP→TCP switch is skipped for the same reason.
   - The lookup never switches a stream whose group and port another stream
     also uses (the packets would arrive mixed). The global `prefer` setting
     doesn't check that; it's documented, not enforced.
 
   It never works on Docker Desktop, so the default stays TCP and multicast
   is opt-in.
+- **No picture → a cover that says why, never a frozen frame** (owner's
+  request after the 2026-11-06 LAN outage):
+  - **Every FFmpeg start also knocks on the camera's port** (`probeHost`,
+    3 s). On "unreachable" the FFmpeg is killed at once: FFmpeg itself takes
+    up to 25 s to give up.
+  - **An unreachable camera is waited for, not retried.** The session knocks
+    every 5 s and starts FFmpeg only when the camera answers. That is not
+    counted as restarts and never gives up while someone watches. Don't put
+    it back on the restart backoff: that was the 30-second FFmpeg churn of
+    the outage.
+  - **"The camera network is down"** = no other camera playing and up to four
+    other camera hosts unreachable (`cameraNetworkDown`, cached 10 s). A
+    "refused" host counts as reachable.
+  - **`STREAM_PROBLEM` (0x0A) is sent after `STREAM_ERROR`**, so old
+    clients still get the text, and new ones ignore unknown types. It
+    carries the problem's *age*, not a timestamp, so the client's clock
+    places "since". It is re-sent after every failed start (`force`): a
+    restart that got as far as the stream header told clients 'streaming'.
+  - **"since" is when the picture was lost** (`lostAt`: last video, or the
+    first failed start), kept across retries. An idle stop forgets it.
+  - **The pane shows its own "Lost the connection to LookyLooky"** after
+    10 s with the socket closed. Short reconnects are routine.
+  - Overlay element ids use the `np-` prefix; `sp-` is the speaker button.
 - **Audio:**
   - One focused pane follows the master mute/volume.
   - Pane speakers add more, at master volume, ignoring the master mute.
