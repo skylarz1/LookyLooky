@@ -293,8 +293,12 @@ LookyLooky copes with that by itself:
   lost packet smears the picture until the next keyframe. On 2026-11-07 the
   Uniview groups (cam-30 to cam-34) lost packets on the way to the server
   while every Dahua group arrived whole. `/stats` counts the gaps.
-- **In every case,** that stream skips multicast for an hour. Recycle Cameras
-  retries it.
+- **In every case,** that stream skips multicast for an hour.
+- **Retry multicast** (Settings → Status, or on `/stats` for all streams or
+  one stream) brings fallen-back streams back after you fix the network. A
+  running stream swaps make-before-break, so no viewer is dropped. If
+  multicast still gets no picture or keeps losing packets, the stream returns
+  to unicast. Recycle Cameras retries multicast too, but drops every viewer.
 - **Recordings** use multicast only once the live stream has proven it
   works.
 - **Checking:** `/api/cameras` shows `delivery: "multicast"` or
@@ -416,6 +420,7 @@ LOOKY_ADMIN_PASSWORD=... node tools/browserload.js --url https://looky.local --i
 | POST | `/api/cameras/:id/start` `stop` `restart` | |
 | POST | `/api/cameras/batch` | Bulk add from the network scan. The response is a server-sent event stream (discover → test → add) |
 | POST | `/api/cameras/recycle` | Every FFmpeg stops and every viewer reconnects |
+| POST | `/api/multicast/retry` | Streams that fell back to unicast try multicast again without dropping viewers; body `{cameraId?, variant?}` narrows it (admin) |
 | POST | `/api/cameras/import` | `{path}` inside the container, or `{files:[{name,content}]}` |
 | GET | `/api/export` | Everything, as one JSON (importable) |
 | GET / POST / PUT / DELETE | `/api/layouts`, `/api/layouts/:id` | |
