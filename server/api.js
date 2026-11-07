@@ -13,7 +13,7 @@ const { normaliseCamera, normaliseLayout, parseImport, slugify, defaultLayout, D
 const { probe, multicastSetup } = require('./probe');
 const { discover, lookupMulticast, streamKey, sharedGroups } = require('./onvif');
 const { scan } = require('./scan');
-const { redact, hostOf } = require('./sources');
+const { redact, hostOf, clearMulticastMemory } = require('./sources');
 
 const VERSION = require('../package.json').version;
 
@@ -87,6 +87,26 @@ function register(router, ctx) {
     }
     manager.add(cam);
     sendJson(res, 201, { camera: cam });
+  }));
+
+  /**
+   * Retry multicast where streams fell back to unicast (after fixing the
+   * network), without dropping viewers: running streams swap make-before-break
+   * and the rest use multicast at their next start.  Body {cameraId?, variant?}
+   * narrows it; empty means every stream.
+   */
+  router.post('/api/multicast/retry', admin(async (req, res) => {
+    const body = await readJson(req).catch(() => ({})) || {};
+    const streams = [];
+    for (const s of manager.sessions.values()) {
+      if (body.cameraId && s.cameraId !== body.cameraId) continue;
+      if (body.variant && s.label !== body.variant) continue;
+      const onUnicast = s.state === 'live' && !!s.active && !s.active.multicast;
+      if (s.retryMulticast()) streams.push({ cameraId: s.cameraId, variant: s.label, swapping: onUnicast });
+    }
+    clearMulticastMemory(body.cameraId ? `${body.cameraId}/${body.variant || ''}` : '');
+    console.log(`[api] multicast retry: ${streams.filter((x) => x.swapping).length} swapping, ${streams.length} reset`);
+    sendJson(res, 200, { retried: streams.length, swapping: streams.filter((x) => x.swapping).length, streams });
   }));
 
   router.post('/api/cameras/recycle', admin((req, res) => {

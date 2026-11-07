@@ -35,7 +35,9 @@ const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
 const { Fmp4Parser, inbandParamSets, buildHvcc, replaceHvcc, hevcCodecString } = require('./fmp4');
 const P = require('./protocol');
-const { inputArgs, friendlyError, redact, clearSession, noteMulticast, MULTICAST_RETRY_MS, probeHost } = require('./sources');
+const {
+  inputArgs, friendlyError, redact, clearSession, noteMulticast, clearMulticastMemory, wantsMulticast, MULTICAST_RETRY_MS, probeHost,
+} = require('./sources');
 
 const SOFT_CAP = 1.5 * 1024 * 1024;
 const HARD_CAP = 8 * 1024 * 1024;
@@ -359,7 +361,17 @@ class StreamSession {
   }
 
   _onExit(p, code, signal, tail) {
-    if (p === this.pending) { this.pending = null; this.log('recycle replacement exited before taking over'); return; }
+    if (p === this.pending) {
+      this.pending = null;
+      this.log('recycle replacement exited before taking over');
+      // A multicast retry that never got going: stay on unicast for a while.
+      if (p.multicast) {
+        this.noMulticastUntil = Date.now() + MULTICAST_RETRY_MS;
+        noteMulticast(`${this.cameraId}/${this.label}`, false);
+        this.log('multicast retry got no picture — staying on unicast');
+      }
+      return;
+    }
     if (p !== this.active) return;
     this.active = null;
     if (this.state === 'idle' || this.state === 'stopped' || this.state === 'failed') return;
@@ -576,6 +588,32 @@ class StreamSession {
     }
   }
 
+  /** Whether this stream's source is set to use multicast (it may still be on unicast after a fallback). */
+  get multicastWanted() {
+    return !!this.source && wantsMulticast(this.source, this.manager.store.settings);
+  }
+
+  /**
+   * Back onto multicast after a fallback, once the network has been fixed:
+   * forget the fallback and, if the stream is running over unicast, swap
+   * pipelines make-before-break so viewers see no gap.  If multicast still
+   * gets no picture the replacement never takes over and the stream stays
+   * on unicast; if it still loses packets, _onMulticastLoss moves it back.
+   * Returns whether there was anything to retry.
+   */
+  retryMulticast() {
+    if (!this.multicastWanted) return false;
+    this.noMulticastUntil = 0;
+    this.multicastStalls = [];
+    this.multicastLoss = [];
+    clearMulticastMemory(`${this.cameraId}/${this.label}`);
+    if (this.state === 'live' && this.active && !this.active.multicast && !this.pending) {
+      this.log('retrying multicast (make-before-break)');
+      this._recycle();
+    }
+    return true;
+  }
+
   /**
    * Multicast is plain UDP: a lost packet corrupts the picture until the
    * next keyframe (green smears on H.265, which is seconds on a camera with a
@@ -755,6 +793,7 @@ class StreamSession {
       audio: this.audioConfigMsg ? 'opus' : (this.audioAvailable === false ? 'none' : null),
       kbps: Math.round((this._bpsSample.bps * 8) / 1000), fps: Math.round(this._bpsSample.fps * 10) / 10,
       inKbps: Math.round((this._bpsSample.inBps * 8) / 1000), multicast: !!this.active?.multicast,
+      multicastWanted: this.multicastWanted,
       ptsLagMs: this.ptsLagMs == null ? null : Math.round(this.ptsLagMs),
       cpuPct: this.manager.metrics?.pidCpu.get(this.active?.proc?.pid) ?? null,
       rss: this.manager.metrics?.pidRss.get(this.active?.proc?.pid) ?? null,

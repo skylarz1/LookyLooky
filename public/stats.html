@@ -30,6 +30,7 @@
     .btn { background: var(--surface); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 6px 12px;
            font: inherit; font-size: 13px; cursor: pointer; text-decoration: none; }
     .btn:hover { border-color: var(--accent); color: var(--accent); }
+    td .btn.retry { padding: 1px 8px; font-size: 11px; margin-left: 4px; }
     main { padding: 16px; display: grid; gap: 16px; }
     section { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; min-width: 0; }
     section h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-dim); margin: 0 0 10px; font-weight: 600; }
@@ -75,6 +76,9 @@
     <section>
       <h2>Streams</h2>
       <div class="scroll"><table id="streams"></table></div>
+      <p class="note"><button class="btn" id="retryAll">Retry multicast on all</button>
+        <span id="retryNote">Streams set to multicast but showing <b>unicast</b> fell back (no picture, stalls or lost packets).
+        After fixing the network, retry: they swap back without a gap, and return to unicast if multicast still fails.</span></p>
     </section>
     <section>
       <h2>Viewers</h2>
@@ -158,7 +162,9 @@
       document.getElementById('streams').innerHTML = head + rows.map((x) => `<tr>
         <td title="${esc(x.cameraId)}">${esc(names[x.cameraId] || x.cameraId)}</td><td class="l">${esc(x.variant)}</td>
         <td class="l ${x.state === 'live' ? 'ok' : x.state === 'failed' ? 'bad' : 'warn'}" title="${esc(x.lastError || '')}">${esc(x.state)}</td>
-        <td class="l">${x.multicast ? 'multicast' : x.state === 'live' ? 'unicast' : ''}</td>
+        <td class="l">${x.multicast ? 'multicast' : x.state !== 'live' ? '' : x.multicastWanted
+          ? `<span class="warn">unicast</span> <button class="btn retry" data-cam="${esc(x.cameraId)}" data-variant="${esc(x.variant)}" title="Try multicast again">Retry</button>`
+          : 'unicast'}</td>
         <td class="l">${esc(x.videoCodec || '')}</td><td>${x.width ? x.width + '×' + x.height : ''}</td>
         <td>${n(x.fps, 1)}</td><td>${n(x.inKbps)}</td><td>${x.clients + (x.internalConsumers || 0)}</td><td>${n(x.kbps)}</td>
         <td class="${cls(x.cpuPct, 30, 60)}">${x.cpuPct == null ? '–' : n(x.cpuPct, 1) + ' %'}</td><td>${mb(x.rss)}</td>
@@ -180,6 +186,23 @@
           <td>${spread(r.arrival, 300, 1000)}</td><td>${spread(r.render, 600, 1500)}</td><td>${n(r.rttMs)}</td><td class="l dim">${esc(notes)}</td></tr>`;
       }).join('') : '<tr><td class="l dim" colspan="14">Nobody is watching.</td></tr>');
     }
+
+    async function retryMulticast(body, label) {
+      const note = document.getElementById('retryNote');
+      try {
+        const r = await fetch('/api/multicast/retry', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const j = await r.json();
+        note.textContent = `${time(Date.now())}: ${label}: ${j.swapping} stream(s) switching back to multicast. Watch Via and RTP gaps here.`;
+      } catch (err) { note.textContent = `Retry failed: ${err.message}`; }
+    }
+    document.getElementById('retryAll').onclick = () => retryMulticast({}, 'all streams');
+    document.getElementById('streams').addEventListener('click', (e) => {
+      const b = e.target.closest('button.retry');
+      if (!b) return;
+      b.disabled = true;
+      retryMulticast({ cameraId: b.dataset.cam, variant: b.dataset.variant }, `${names[b.dataset.cam] || b.dataset.cam} ${b.dataset.variant}`);
+    });
 
     let paused = false, timer = 0, lastNames = 0;
     document.getElementById('pause').onclick = (e) => { paused = !paused; e.target.textContent = paused ? 'Resume' : 'Pause'; if (!paused) poll(); };
