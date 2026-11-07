@@ -11,7 +11,7 @@ const path = require('path');
 process.env.LOOKY_DATA_DIR = process.env.LOOKY_DATA_DIR || path.join(__dirname, 'out', 'network-data');
 const sources = require('../server/sources');
 const P = require('../server/protocol');
-const { DEFAULT_SETTINGS } = require('../server/config');
+const { DEFAULT_SETTINGS, normaliseCamera } = require('../server/config');
 
 const results = [];
 const check = (name, ok, detail = '') => { results.push({ name, ok, detail }); console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`); };
@@ -98,6 +98,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const last = problems().pop();
     check('clear: video back → STREAM_PROBLEM kind 0, and "since" forgotten', last[2] === P.PROBLEM.CLEAR && s.lostAt === 0 && s.problem === null);
     s.destroy();
+
+    // --- multicast packet loss, with and without keepMulticast -------------
+    const lossy = (keep) => {
+      const c = { id: 'mc', name: 'Mc', enabled: true, sources: [{ label: 'sub', type: 'rtsp', url: 'rtsp://192.0.2.9/x', transport: 'multicast', ...(keep ? { keepMulticast: true } : {}) }] };
+      const m = new StreamSession({ ...fake, camera: () => c }, 'mc', 'sub');
+      m.log = () => {};
+      let recycled = 0; m._recycle = () => { recycled++; };
+      const p = { multicast: true }; m.active = p;
+      m._onMulticastLoss(p, 2); m._onMulticastLoss(p, 2);
+      return { recycled, gaps: m.stats.rtpGaps, off: m.noMulticastUntil > Date.now() };
+    };
+    const plain = lossy(false), kept = lossy(true);
+    check('multicast loss: 3 gaps in a minute → unicast', plain.recycled === 1 && plain.off, JSON.stringify(plain));
+    check('multicast loss: keepMulticast stays on multicast, still counts the gaps', kept.recycled === 0 && !kept.off && kept.gaps === 4, JSON.stringify(kept));
+    check('keepMulticast survives normaliseCamera', normaliseCamera({ id: 'k', name: 'K', sources: [{ url: 'rtsp://h/x', transport: 'multicast', keepMulticast: true }] }).sources[0].keepMulticast === true);
   } catch (err) {
     check('no exceptions', false, err.stack);
   } finally {

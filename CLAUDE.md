@@ -114,6 +114,9 @@ test/network.js           unreachable cameras: the TCP knock, STREAM_PROBLEM, wa
   - no picture within 8 s, or two stalls in 15 minutes (a switch without an
     IGMP querier) → unicast;
   - that stream then skips multicast for an hour; Recycle clears this;
+  - a source with `keepMulticast` ignores lost packets and stalls (not
+    "no picture at all"): for cameras that struggle with more unicast
+    streams (the Temple cameras);
   - `transport: 'multicast'` falls back to TCP; with the global `prefer`, a
     `udp` source falls back to UDP;
   - `multicastUrl` is only for cameras whose multicast RTSP address

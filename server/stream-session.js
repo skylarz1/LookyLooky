@@ -422,7 +422,8 @@ class StreamSession {
     // the classic sign of a switch with IGMP snooping and no IGMP querier: it
     // prunes the group a few minutes after each join.  Twice in 15 minutes and
     // this stream goes back to TCP.
-    if (p.multicast && this.liveSince > 0 && /stopped sending video/.test(tail || '')) {
+    // Not for a source set to keep multicast: the restart below rejoins the group.
+    if (p.multicast && this.liveSince > 0 && /stopped sending video/.test(tail || '') && !this.source.keepMulticast) {
       const now = Date.now();
       this.multicastStalls = this.multicastStalls.filter((t) => now - t < 15 * 60 * 1000);
       this.multicastStalls.push(now);
@@ -620,11 +621,13 @@ class StreamSession {
    * long keyframe interval).  Seen on the Uniview cameras, whose groups lose
    * packets on the way while every Dahua group arrives whole.  A stream that
    * loses packets three times in a minute moves to unicast TCP for a while,
-   * make-before-break, so viewers see no gap.
+   * make-before-break, so viewers see no gap.  Not a source set to keep
+   * multicast (cameras that struggle with more unicast streams): it only
+   * counts the gaps, and keeps the occasional smeared frame.
    */
   _onMulticastLoss(p, gaps) {
     this.stats.rtpGaps += gaps;
-    if (p !== this.active || this.pending) return;
+    if (p !== this.active || this.pending || this.source.keepMulticast) return;
     const now = Date.now();
     this.multicastLoss = this.multicastLoss.filter((t) => now - t < 60000);
     for (let i = 0; i < gaps; i++) this.multicastLoss.push(now);

@@ -293,6 +293,12 @@ LookyLooky copes with that by itself:
   lost packet smears the picture until the next keyframe. On 2026-11-07 the
   Uniview groups (cam-30 to cam-34) lost packets on the way to the server
   while every Dahua group arrived whole. `/stats` counts the gaps.
+- **Stay on multicast when packets are lost** (a checkbox under Multicast
+  in the camera's settings): the stream keeps multicast through lost packets
+  and stalls, and lives with the occasional smeared frame. It's for cameras
+  that cope badly with extra unicast streams, such as the Temple cameras,
+  where each fallback adds one more. A stream that gets no picture at all
+  over multicast still falls back.
 - **In every case,** that stream skips multicast for an hour.
 - **Retry multicast** (Settings → Status, or on `/stats` for all streams or
   one stream) brings fallen-back streams back after you fix the network. A
