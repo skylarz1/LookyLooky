@@ -150,6 +150,9 @@ function normaliseSource(s, fallbackLabel) {
   // A separate RTSP address for multicast (ONVIF's RTP-Multicast URI), when the camera has one.
   if (s.multicastUrl && /^rtsps?:\/\//i.test(String(s.multicastUrl).trim())) out.multicastUrl = String(s.multicastUrl).trim();
   if (out.multicastUrl === out.url) delete out.multicastUrl;
+  // Stay on multicast when it loses packets or stalls (stream-session.js), for
+  // cameras that cope badly with extra unicast streams.
+  if (s.keepMulticast) out.keepMulticast = true;
   if (out.type !== sourceType(out.url) && !['rtsp', 'http', 'rtmp', 'test', 'file'].includes(out.type)) out.type = sourceType(out.url);
   if (s.transcode) out.transcode = true;
   if (s.params && typeof s.params === 'object') out.params = { ...s.params };

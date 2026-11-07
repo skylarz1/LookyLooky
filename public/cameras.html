@@ -935,6 +935,8 @@
           <label>Multicast addresses <span style="font-size:11px;color:var(--text-dim);">(optional — only for cameras that use a different RTSP address for multicast; ONVIF Discover fills them in. Empty = the stream URLs above.)</span></label>
           <input id="camMcUrl" placeholder="Main stream, multicast" style="margin-bottom:6px;" />
           <input id="camSubMcUrl" placeholder="Substream, multicast" />
+          <label style="font-size:13px;display:flex;align-items:center;gap:5px;cursor:pointer;margin-top:8px;"><input type="checkbox" id="camKeepMc" style="width:auto;margin:0;flex:none;" /> Stay on multicast when packets are lost</label>
+          <div class="mc-hint">For cameras that struggle with extra unicast streams. Lost packets show as an occasional smeared frame instead of a switch to TCP. A stream that gets no picture at all over multicast still falls back.</div>
           <div class="mc-hint">Multicast only reaches LookyLooky when its container is on the cameras' network (Linux, <code>network_mode: host</code>). On Docker Desktop it can't arrive, and the stream falls back to TCP after about 8 seconds.</div>
         </div>
         <div class="form-group">
@@ -2618,6 +2620,7 @@
       document.getElementById('camTranscode').value = '';
       document.getElementById('camMcUrl').value = '';
       document.getElementById('camSubMcUrl').value = '';
+      document.getElementById('camKeepMc').checked = false;
       document.getElementById('camMulticastHint').style.display = 'none';
       _editSources = [];
       syncMulticastRow();
@@ -2670,6 +2673,7 @@
             document.getElementById('camTransport').value = mainSrc.transport || 'tcp';
             document.getElementById('camTranscode').value = mainSrc.transcode ? '1' : '';
             document.getElementById('camMcUrl').value = mainSrc.multicastUrl || '';
+            document.getElementById('camKeepMc').checked = !!mainSrc.keepMulticast;
           }
           document.getElementById('camSubUrl').value = subSrc?.url || '';
           document.getElementById('camSubMcUrl').value = subSrc?.multicastUrl || '';
@@ -2736,9 +2740,10 @@
       };
       const mcUrl    = document.getElementById('camMcUrl').value.trim();
       const subMcUrl = document.getElementById('camSubMcUrl').value.trim();
+      const keepMulticast = transport === 'multicast' && document.getElementById('camKeepMc').checked;
       const sources = [];
-      if (mainUrl) sources.push({ ...kept('main', mainUrl), label: 'main', url: mainUrl, transport, ...(transcode ? { transcode } : {}), ...(mcUrl ? { multicastUrl: mcUrl } : {}) });
-      if (subUrl)  sources.push({ ...kept('sub', subUrl), label: 'sub',  url: subUrl,  transport, ...(transcode ? { transcode } : {}), ...(subMcUrl ? { multicastUrl: subMcUrl } : {}) });
+      if (mainUrl) sources.push({ ...kept('main', mainUrl), label: 'main', url: mainUrl, transport, ...(transcode ? { transcode } : {}), ...(mcUrl ? { multicastUrl: mcUrl } : {}), ...(keepMulticast ? { keepMulticast } : {}) });
+      if (subUrl)  sources.push({ ...kept('sub', subUrl), label: 'sub',  url: subUrl,  transport, ...(transcode ? { transcode } : {}), ...(subMcUrl ? { multicastUrl: subMcUrl } : {}), ...(keepMulticast ? { keepMulticast } : {}) });
 
       const cam = {
         id: document.getElementById('camId').value.trim(),
