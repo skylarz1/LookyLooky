@@ -16,7 +16,7 @@ const { StreamSession } = require('./stream-session');
 const { MjpegSession } = require('./mjpeg');
 const { probe } = require('./probe');
 const { normaliseCamera, ID_RE } = require('./config');
-const { hostOf, clearAllSessions } = require('./sources');
+const { hostOf, clearAllSessions, clearMulticastMemory } = require('./sources');
 
 class CameraManager {
   constructor(store) {
@@ -132,10 +132,14 @@ class CameraManager {
         sourceHost: hostOf(cam.sources[0]?.url),
         variants: cam.sources.map((src) => {
           const v = this.variantInfo(cam.id, src.label) || {};
+          const sess = this.sessions.get(`${cam.id}/${src.label}`);
+          const live = sess && sess.active && sess.state === 'live';
           return {
             label: src.label, type: src.type,
             videoCodec: v.videoCodec || null, width: v.width || null, height: v.height || null,
             fps: v.fps || null, audioCodec: v.audioCodec || null, transcode: !!src.transcode,
+            // How the running stream arrives: 'multicast' | 'unicast'; null when not running.
+            delivery: live ? (sess.active.multicast ? 'multicast' : 'unicast') : null,
           };
         }),
       };
@@ -164,6 +168,7 @@ class CameraManager {
     this.store.saveCameras();
     if (sourcesChanged) {
       this._teardownCamera(id, true);
+      clearMulticastMemory(`${id}/`);
       for (const k of [...this.variants.keys()]) if (k.startsWith(id + '/')) this.variants.delete(k);
       this.probeCamera(existing);
     }
@@ -230,6 +235,7 @@ class CameraManager {
     const strays = this.killStrays(true);
     const viewers = this.hub ? this.hub.closeAll(1012, 'recycle') : 0;
     clearAllSessions();
+    clearMulticastMemory(); // a recycle retries multicast where it fell back
     for (const cam of this.cameras) if (cam.enabled) this.state.set(cam.id, { status: 'running', lastError: null });
     setTimeout(() => this.applyKeepWarm(), 500);
     return { cameras, processes, strays, viewers };

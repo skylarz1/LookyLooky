@@ -192,6 +192,69 @@ Pipeline settings (Settings → Streaming):
 back in. A UDP stream that shows no picture within about 8 s switches itself
 to TCP. To really use UDP, run with `network_mode: host` on Linux.
 
+### Multicast
+
+With RTSP multicast, a camera sends each stream **once** onto the network,
+and every receiver (LookyLooky, an NVR, another relay) joins it. A camera
+that several systems watch then encodes and sends one copy instead of one per
+connection. LookyLooky on its own already shares one camera connection among
+all of its viewers, so multicast pays off when **other** systems pull the
+same cameras too.
+
+- **Per camera:** Transport → *Multicast* (camera dialog, network scan).
+- **For all RTSP cameras:** Settings → Streaming → *RTSP multicast* → *Try
+  multicast for every RTSP camera*.
+- **Addresses from ONVIF:**
+  - ONVIF Discover shows each stream's multicast group, and fills in its
+    multicast RTSP address when it differs from the unicast one.
+  - For cameras already set up, use Settings → Streaming → *Look up
+    multicast on all cameras (ONVIF)*. It asks each camera on port 80 with
+    the login from its stream URL, and can switch the ones that offer it.
+  - The lookup also asks each stream's RTSP server for multicast and
+    reports the group and port it **really** sends to, or why it won't
+    (404, 461, no multicast address set, no valid answer). ONVIF's group
+    can't be relied on: Dahua cameras report one there and send to another.
+  - API: `POST /api/multicast/lookup {"enable": true}`.
+- **Give every camera its own multicast address first.** Dahua cameras all
+  ship with group `224.1.2.4` and the same ports (main 40000, sub 40016), so
+  two of them on multicast arrive **mixed** at every receiver. The lookup
+  lists such streams under *Group shared with another stream* and never
+  switches them; set a unique address in each camera's web page (Setup →
+  Network → Multicast) and run it again. *Try multicast for every RTSP
+  camera* does **not** check this, so don't use it until the lookup shows
+  no shared groups.
+- **cameras.xml:**
+  - per source: `transport="multicast"` and an optional
+    `multicast-url="rtsp://…"`;
+  - for all cameras: `<camera-settings multicast="prefer">`.
+
+**Multicast only reaches LookyLooky when its container is on the cameras'
+network:** a Linux host with `network_mode: host` (see `docker-compose.yml`),
+and switches that forward multicast. It never arrives on **Docker Desktop**
+(its VM sits behind NAT) or a bridged network.
+
+On a PC with several network adapters, the operating system joins the group
+on the adapter its multicast route picks, which may not be the camera
+network's. FFmpeg's RTSP client can't be told which one. On a Linux host,
+add `ip route add 224.0.0.0/4 dev <camera-network interface>` if the
+lookup's groups never arrive.
+
+LookyLooky copes with that by itself:
+- **No picture over multicast within about 8 s:** the stream switches to
+  unicast (the source's own TCP/UDP setting). Not when the camera doesn't
+  answer at all (unplugged, network down): that is reported as *The camera
+  cannot be reached on the network* and retried, and multicast is tried
+  again once it is back.
+- **Stalls twice within 15 minutes while on multicast:** it also switches to
+  unicast. This is the usual symptom of a switch with IGMP snooping but no
+  IGMP querier.
+- **Either way,** that stream skips multicast for an hour. Recycle Cameras
+  retries it.
+- **Recordings** use multicast only once the live stream has proven it
+  works.
+- **Checking:** `/api/cameras` shows `delivery: "multicast"` or
+  `"unicast"` for each running stream, and the log line says which.
+
 `kill -HUP` on the server process re-reads cameras.json and layouts.json.
 
 ## Using it from another stack

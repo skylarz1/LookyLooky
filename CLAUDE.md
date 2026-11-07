@@ -39,8 +39,10 @@ server/ws-server.js       /cameras/stream: subscribe {cameraId, quality, audio:'
 server/mjpeg.js           thumbnails/MJPEG/snapshots decoded from the running session's fMP4 (no extra camera connection)
 server/cameras.js         camera list/status, sessions, keep-warm, recycle, stray reaping, probing
 server/api.js             REST API (see README)    server/config.js  persistence, defaults, XML/JSON import parsers
-server/sources.js         FFmpeg input args per URL type, HTTP session-cookie login, friendly error messages
-server/recordings.js  onvif.js  scan.js  probe.js  tls.js (local CA)  legacy-proxy.js (camera-proxy endpoints)
+server/sources.js         FFmpeg input args per URL type (incl. RTSP multicast + its fallback memory), HTTP session-cookie
+                          login, friendly error messages
+server/onvif.js           ONVIF discovery (stream URIs, multicast URIs and groups) and lookupMulticast for existing cameras
+server/recordings.js  scan.js  probe.js  tls.js (local CA)  legacy-proxy.js (camera-proxy endpoints)
 public/js/camera/         viewer.js (CameraGrid/CameraPane: tiers, budget, zoom, quality, per-pane audio),
                           webcodecsClient.js, audioWorkletProcessor.js — see public/js/camera/README.md
 public/js/widgets/camera-wall.js   the wall widget (story mode via noodleman, or fixed layout)
@@ -52,6 +54,7 @@ public/styles/camera-viewer.css    full-page styles; camera-wall.css is the SAME
 config/                   first-boot seed. Real cameras.xml / camera-layouts.xml contain camera passwords: git-ignored,
                           never commit them. Only *.example.xml are tracked.
 test/e2e.js               browser smoke test     test/features.js  multi-audio, zoom, quality, per-pane speakers
+test/onvif.js             fake ONVIF camera: multicast discovery/lookup, FFmpeg args, fallback memory (no instance needed)
 ```
 
 ## Rules
@@ -105,6 +108,22 @@ test/e2e.js               browser smoke test     test/features.js  multi-audio, 
   drag-drop, wall main change, fullscreen focus).
 - **Quality precedence:** decoder overload, then pane HQ/LQ button, then
   view override, then server policy (default `'sub'`, substreams only).
+- **Multicast falls back to unicast, and remembers it** (`sources.js`):
+  - no picture within 8 s, or two stalls in 15 minutes (a switch without an
+    IGMP querier) → unicast;
+  - that stream then skips multicast for an hour; Recycle clears this;
+  - `transport: 'multicast'` falls back to TCP; with the global `prefer`, a
+    `udp` source falls back to UDP;
+  - `multicastUrl` is only for cameras whose multicast RTSP address
+    differs. Most negotiate multicast on the normal URL in SETUP.
+  - Not when the camera doesn't answer on its RTSP port at all
+    (`reachable()`): an unplugged camera is not a multicast failure.
+  - The lookup never switches a stream whose group and port another stream
+    also uses (the packets would arrive mixed). The global `prefer` setting
+    doesn't check that; it's documented, not enforced.
+
+  It never works on Docker Desktop, so the default stays TCP and multicast
+  is opt-in.
 - **Audio:**
   - One focused pane follows the master mute/volume.
   - Pane speakers add more, at master volume, ignoring the master mute.
@@ -129,6 +148,36 @@ test/e2e.js               browser smoke test     test/features.js  multi-audio, 
 - **`scripts/dev-setup.ps1` parses** (PowerShell 7 parser) and is ASCII only.
   It has not been executed on Windows.
 
+- **Multicast (branch `claude/new-session-iqef3y`):** checked against
+  mediamtx serving RTP multicast:
+  - LookyLooky on host networking gets the stream over multicast
+    (`delivery: "multicast"`);
+  - with multicast blocked (iptables), it switches to unicast after 8 s and
+    the next cold start goes straight to unicast;
+  - `test/onvif.js` covers discovery against a fake ONVIF camera.
+
+- **Multicast with the owner's real cameras (2026-11-06, laptop wired onto
+  the camera network, Docker Desktop):**
+  - **ONVIF's multicast group is not what the cameras send to.** Dahua
+    cameras report e.g. 224.1.0.0 (or 0.0.0.0) over ONVIF, then answer the
+    RTSP SETUP with their web-page default, **224.1.2.4, same ports on every
+    camera** (main 40000, sub 40016). That's why the lookup also asks RTSP
+    (`multicastSetup` in `probe.js`) and flags shared groups
+    (`sharedGroups`). Of 35: 18 share 224.1.2.4, a few more share other
+    groups (one model sends main and sub to the same group and port), 5 have
+    their own group, 1 answers 404 on ONVIF's multicast URL, 3 accept
+    multicast but have no address set, UniFi Protect drops the connection.
+  - **The LAN carries it:** FFmpeg on Windows, outside Docker, joined
+    224.1.2.4 on the wired adapter (`udp://…?localaddr=`) and got the
+    packets at once. FFmpeg's own RTSP multicast pull got nothing, because
+    Windows joined on another adapter (multicast route metric tie with the
+    Npcap loopback), and FFmpeg's RTSP client has no option to pick one.
+  - **Docker Desktop:** `no picture over multicast — switching this stream to
+    unicast` after 10 s, as expected.
+  - Not yet seen: a stream actually playing over multicast through
+    LookyLooky (needs a Linux host on the camera network), and IGMP
+    querier behaviour on the owner's switches.
+
 Reading `/api/cameras`: `status: running` means *enabled*, not *connected*.
 Streams start on demand, and `lastError` only shows while a stream is
 retrying (someone is watching it). To check a camera, open it, or fetch
@@ -151,6 +200,11 @@ retrying (someone is watching it). To check a camera, open it, or fetch
    Chromium with `AudioDecoder` removed to simulate it.
 4. **Load with 35 cameras:** CPU and RAM per FFmpeg, and how many
    simultaneous RTSP sessions each camera model allows.
+5. **Multicast playing end to end** (lookup and fallback are verified,
+   above):
+   - first give each camera its own multicast address in its web page;
+   - then LookyLooky on a Linux host with `network_mode: host` on the camera
+     network, plus a switch that forwards it, ideally with an IGMP querier.
 
 ## Backlog / ideas
 
