@@ -183,6 +183,25 @@ Streams start on demand, and `lastError` only shows while a stream is
 retrying (someone is watching it). To check a camera, open it, or fetch
 `/stream/<id>/snapshot` (504 with a reason after 12 s if it can't connect).
 
+## Verified on the pve5 VM (2026-11-07, Ubuntu 24.04, Docker Engine, host networking)
+
+- **Multicast plays end to end**: substreams of cam-02 and cam-24 (Dahua)
+  and cam-30 (Uniview) delivered `multicast`, each FFmpeg joined its own
+  `229.1.2.x` group on the camera NIC. Needs the netplan route
+  `229.0.0.0/8` on the camera interface (default route is the main LAN).
+- The cameras now use one scheme, set on 2026-11-06: main
+  `229.1.1.<last octet>:11111`, sub `229.1.2.<last octet>:22222`.
+- **EE edge proxy in front** (`docker-compose.host.yml`, README "Linux host
+  ..."): `http://looky.local` and `http://<IP>` redirect to https;
+  `https://looky.local` and `https://<IP>` serve LookyLooky's own
+  certificate (same CA as before); WebSocket upgrade, API auth, snapshots
+  pass through; `looky.local` answers mDNS on the main LAN.
+- **cam-32 / cam-33 substreams (Uniview, H.265) fail** with "video parse:
+  Attempt to access memory outside buffer bounds": their SDP has SPS/PPS but
+  no VPS (`sprop-vps` missing), so the hvcC FFmpeg writes is unusable. A
+  camera reboot didn't change it. Don't change camera codecs without the
+  owner's OK.
+
 ## Not verified yet (do these first on the owner's hardware)
 
 1. **Docker Desktop on Windows:** the first `docker compose up --build`

@@ -1,0 +1,32 @@
+# LookyLooky on a Linux host (the pve5 VM): host networking, so RTSP multicast
+# and UDP reach FFmpeg, behind the EE edge proxy that owns ports 80 and 443
+# (https://looky.local, no port numbers; http:// redirects to https://).
+#
+# Put this in .env next to the compose files so plain `docker compose ...`
+# picks up all three:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.host.yml:docker-compose.override.yml
+#
+# The proxy's route for looky.local (and any other name) lives in the EE edge
+# stack's sites/lookylooky.caddy: a host-network container can't join the
+# proxy's Docker network, so it can't be routed from labels. The edge stack's
+# announcer publishes the *.local names from that file over mDNS. Every name
+# there must also be in LOOKY_HOSTNAMES, so the certificate covers it.
+
+services:
+  lookylooky:
+    network_mode: host
+    ports: !reset []
+    environment:
+      # What browsers see through the proxy: links and redirects carry no port.
+      LOOKY_PUBLIC_HTTPS_PORT: "443"
+      LOOKY_PUBLIC_HTTP_PORT: "80"
+      # The proxy serves our names with our own certificate (same CA the
+      # devices already trust). Only server.crt/server.key/ca.crt go here,
+      # never the CA key.
+      LOOKY_TLS_EXPORT_DIR: /tls-export
+    volumes:
+      - lookylooky-tls:/tls-export
+
+volumes:
+  lookylooky-tls:
+    name: lookylooky-tls
