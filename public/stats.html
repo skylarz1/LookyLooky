@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<!--
+  LookyLooky statistics: /stats.  Polls /api/stats?viewers=1&history=1 every 2 s.
+
+  Where lag can build up, and the column that shows it:
+    camera -> server     Streams: "In fps" below the camera's rate, restarts
+    server queue         Viewers: "Queue" (unsent bytes on the socket, and that in time)
+    server -> browser    Viewers: "Arrival" (p50 / p95 of frame arrival, server clock)
+    browser decode/draw  Viewers: "Screen" (p50 / p95 until the frame is drawn), "Dropped", "Decode q"
+  Arrival and Screen come from the viewer's own report, so only browsers
+  running this version's viewer code have them.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LookyLooky - Statistics</title>
+  <link rel="icon" type="image/svg+xml" href="/images/favicon.svg">
+  <style>
+    :root {
+      --bg: #0f1117; --surface: #1a1d27; --border: #2a2d3a; --text: #e1e4ed; --text-dim: #8b8fa3;
+      --accent: #f2711c; --green: #34d399; --red: #f87171; --yellow: #fbbf24; --blue: #60a5fa; --radius: 8px;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+    header { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+    header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+    header .spacer { flex: 1; }
+    #updated { color: var(--text-dim); font-size: 12px; font-variant-numeric: tabular-nums; }
+    .btn { background: var(--surface); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 6px 12px;
+           font: inherit; font-size: 13px; cursor: pointer; text-decoration: none; }
+    .btn:hover { border-color: var(--accent); color: var(--accent); }
+    main { padding: 16px; display: grid; gap: 16px; }
+    section { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; min-width: 0; }
+    section h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-dim); margin: 0 0 10px; font-weight: 600; }
+    .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+    .tile .v { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .tile .l { font-size: 11px; color: var(--text-dim); }
+    .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+    .chart svg { width: 100%; height: 140px; display: block; }
+    .legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+    .legend i { display: inline-block; width: 10px; height: 3px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
+    .scroll { overflow-x: auto; }
+    table { border-collapse: collapse; width: 100%; font-size: 12px; font-variant-numeric: tabular-nums; }
+    th, td { padding: 5px 8px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--border); }
+    th { color: var(--text-dim); font-weight: 600; position: sticky; top: 0; background: var(--surface); cursor: pointer; }
+    th:first-child, td:first-child, th.l, td.l { text-align: left; }
+    tr:hover td { background: rgba(255,255,255,.03); }
+    .ok { color: var(--green); } .warn { color: var(--yellow); } .bad { color: var(--red); } .dim { color: var(--text-dim); }
+    .note { color: var(--text-dim); font-size: 12px; margin: 8px 0 0; }
+    @media (max-width: 600px) { main { padding: 8px; } section { padding: 10px; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>LookyLooky statistics</h1>
+    <span class="spacer"></span>
+    <span id="updated">Loading…</span>
+    <button class="btn" id="pause">Pause</button>
+    <a class="btn" href="/cameras.html">Dashboard</a>
+  </header>
+  <main>
+    <section>
+      <h2>Server</h2>
+      <div class="tiles" id="tiles"></div>
+    </section>
+    <section class="charts">
+      <div class="chart"><h2>CPU (% of one core) and event-loop delay, last 30 min</h2><svg id="cpuChart"></svg>
+        <div class="legend"><span><i style="background:var(--accent)"></i>Host (all cores)</span><span><i style="background:var(--blue)"></i>FFmpeg</span>
+          <span><i style="background:var(--green)"></i>LookyLooky</span><span><i style="background:var(--red)"></i>Loop delay p99 (ms)</span></div></div>
+      <div class="chart"><h2>Network (Mbit/s) and viewers, last 30 min</h2><svg id="netChart"></svg>
+        <div class="legend"><span><i style="background:var(--blue)"></i>In</span><span><i style="background:var(--accent)"></i>Out</span>
+          <span><i style="background:var(--green)"></i>Viewers watching</span></div></div>
+    </section>
+    <section>
+      <h2>Streams</h2>
+      <div class="scroll"><table id="streams"></table></div>
+    </section>
+    <section>
+      <h2>Viewers</h2>
+      <div class="scroll"><table id="viewers"></table></div>
+      <p class="note">Arrival and Screen: how long after the server sent a frame it arrived and was drawn (median / 95th percentile, last 5 s).
+        Queue: what the server still has to send this viewer. Blank cells: the browser runs an older viewer, or it hasn't reported yet.</p>
+    </section>
+  </main>
+  <script>
+    const ET = { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true };
+    const time = (ms) => new Date(ms).toLocaleTimeString('en-US', ET);
+    const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const mb = (b) => (b == null ? '–' : b >= 1024 ** 3 ? (b / 1024 ** 3).toFixed(1) + ' GB' : Math.round(b / 1024 ** 2) + ' MB');
+    const n = (v, d = 0) => (v == null ? '–' : Number(v).toFixed(d));
+    const cls = (v, warn, bad) => (v == null ? 'dim' : v >= bad ? 'bad' : v >= warn ? 'warn' : '');
+    const since = (ms) => { const s = Math.round((Date.now() - ms) / 1000); return s < 90 ? s + ' s' : s < 5400 ? Math.round(s / 60) + ' min' : (s / 3600).toFixed(1) + ' h'; };
+    function browser(ua) {
+      if (!ua) return '–';
+      const m = /(Edg|OPR|Chrome|Firefox|Version)\/(\d+)/.exec(ua);
+      const os = /iPad|iPhone/.test(ua) ? 'iOS' : /Mac OS X/.test(ua) ? 'macOS' : /Windows/.test(ua) ? 'Windows' : /Android/.test(ua) ? 'Android' : /Linux/.test(ua) ? 'Linux' : '';
+      const name = m ? ({ Edg: 'Edge', OPR: 'Opera', Version: 'Safari' }[m[1]] || m[1]) + ' ' + m[2] : ua.split(' ')[0];
+      return `${name}${os ? ' · ' + os : ''}${/Headless/.test(ua) ? ' (headless)' : ''}`;
+    }
+
+    let names = {};
+    async function loadNames() {
+      try {
+        const r = await fetch('/api/cameras');
+        for (const c of (await r.json()).cameras || []) names[c.id] = c.name;
+      } catch { /* keep the old ones */ }
+    }
+
+    function chart(svg, series, rows, { maxMin = 10, right } = {}) {
+      const W = svg.clientWidth || 600, H = 140, pad = 26;
+      if (!rows.length) { svg.innerHTML = ''; return; }
+      const t0 = rows[0].t, t1 = rows[rows.length - 1].t || t0 + 1;
+      const x = (t) => pad + ((t - t0) / Math.max(1, t1 - t0)) * (W - pad * 2);
+      const left = series.filter((s) => !s.right), rs = series.filter((s) => s.right);
+      const top = (list, min) => Math.max(min, ...rows.flatMap((r) => list.map((s) => r[s.key] ?? 0)));
+      const lmax = top(left, maxMin) * 1.1, rmax = rs.length ? top(rs, right || 5) * 1.1 : 1;
+      const y = (v, m) => H - 16 - (v / m) * (H - 26);
+      let out = '';
+      for (let i = 0; i <= 2; i++) {
+        const v = (lmax * i) / 2, yy = y(v, lmax);
+        out += `<line x1="${pad}" x2="${W - pad}" y1="${yy}" y2="${yy}" stroke="var(--border)"/>`;
+        out += `<text x="2" y="${yy + 4}" fill="var(--text-dim)" font-size="10">${Math.round(v)}</text>`;
+        if (rs.length) out += `<text x="${W - pad + 4}" y="${yy + 4}" fill="var(--text-dim)" font-size="10">${Math.round((rmax * i) / 2)}</text>`;
+      }
+      out += `<text x="${pad}" y="${H - 2}" fill="var(--text-dim)" font-size="10">${time(t0)}</text>`;
+      out += `<text x="${W - pad}" y="${H - 2}" fill="var(--text-dim)" font-size="10" text-anchor="end">${time(t1)}</text>`;
+      for (const s of series) {
+        const m = s.right ? rmax : lmax;
+        const pts = rows.filter((r) => r[s.key] != null).map((r) => `${x(r.t).toFixed(1)},${y(r[s.key], m).toFixed(1)}`).join(' ');
+        out += `<polyline points="${pts}" fill="none" stroke="${s.color}" stroke-width="1.6" stroke-linejoin="round"/>`;
+      }
+      svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+      svg.innerHTML = out;
+    }
+
+    function tiles(s) {
+      const h = s.host || {};
+      const nets = Object.entries(h.net || {}).map(([k, v]) => [`${k} in / out`, `${n(v.rxMbps, 1)} / ${n(v.txMbps, 1)}`, 'Mbit/s']);
+      const list = [
+        ['Host CPU', h.hostCpuPct == null ? '–' : n(h.hostCpuPct) + ' %', `${h.cores || '?'} cores · load ${(h.loadavg || []).join(' ')}`, cls(h.hostCpuPct, 70, 90)],
+        ['LookyLooky CPU', h.app ? n(h.app.cpuPct) + ' %' : '–', 'of one core'],
+        ['FFmpeg CPU', h.ffmpeg && h.ffmpeg.cpuPct != null ? n(h.ffmpeg.cpuPct) + ' %' : '–', `${h.ffmpeg ? h.ffmpeg.count : 0} processes · ${mb(h.ffmpeg && h.ffmpeg.rss)}`],
+        ['Event-loop delay p99', h.app ? `${n(h.app.loop.p99Ms, 1)} ms` : '–', h.app ? `median ${n(h.app.loop.p50Ms, 1)} · max ${n(h.app.loop.maxMs, 0)} ms` : '', cls(h.app && h.app.loop.p99Ms, 50, 200)],
+        ['Memory', h.memTotal ? `${mb(h.memTotal - h.memAvailable)}` : '–', h.memTotal ? `of ${mb(h.memTotal)} · app ${mb(s.memory.app.rss)}` : ''],
+        ['Live streams', String(h.streams ?? s.activeStreams), `${s.activeStreams} running`],
+        ['Viewers', String(h.watching ?? '–'), `${s.totalClients} sockets open`],
+        ...nets.map(([l, v, u]) => [l, v, u]),
+        ['Up since', time(Date.now() - s.uptime * 1000), since(Date.now() - s.uptime * 1000)],
+      ];
+      document.getElementById('tiles').innerHTML = list.map(([l, v, sub, c]) =>
+        `<div class="tile"><div class="v ${c || ''}">${esc(v)}</div><div class="l">${esc(l)}${sub ? ' · ' + esc(sub) : ''}</div></div>`).join('');
+    }
+
+    function streams(s) {
+      const rows = (s.sessions || []).filter((x) => x.state !== 'idle').sort((a, b) => (names[a.cameraId] || a.cameraId).localeCompare(names[b.cameraId] || b.cameraId) || a.variant.localeCompare(b.variant));
+      const head = '<tr><th class="l">Camera</th><th class="l">Stream</th><th class="l">State</th><th class="l">Via</th><th class="l">Codec</th><th>Size</th><th>In fps</th><th>In kbit/s</th><th>Viewers</th><th>Out kbit/s</th><th>FFmpeg CPU</th><th>FFmpeg RAM</th><th>Skips</th><th>Kicks</th><th title="Packets lost on the way while on multicast">RTP gaps</th><th>Restarts</th><th>Up</th></tr>';
+      document.getElementById('streams').innerHTML = head + rows.map((x) => `<tr>
+        <td title="${esc(x.cameraId)}">${esc(names[x.cameraId] || x.cameraId)}</td><td class="l">${esc(x.variant)}</td>
+        <td class="l ${x.state === 'live' ? 'ok' : x.state === 'failed' ? 'bad' : 'warn'}" title="${esc(x.lastError || '')}">${esc(x.state)}</td>
+        <td class="l">${x.multicast ? 'multicast' : x.state === 'live' ? 'unicast' : ''}</td>
+        <td class="l">${esc(x.videoCodec || '')}</td><td>${x.width ? x.width + '×' + x.height : ''}</td>
+        <td>${n(x.fps, 1)}</td><td>${n(x.inKbps)}</td><td>${x.clients + (x.internalConsumers || 0)}</td><td>${n(x.kbps)}</td>
+        <td class="${cls(x.cpuPct, 30, 60)}">${x.cpuPct == null ? '–' : n(x.cpuPct, 1) + ' %'}</td><td>${mb(x.rss)}</td>
+        <td class="${x.skips ? 'warn' : ''}">${x.skips}</td><td class="${x.kicks ? 'bad' : ''}">${x.kicks}</td><td class="${x.rtpGaps ? 'warn' : ''}">${x.rtpGaps || 0}</td><td>${x.restarts}</td>
+        <td>${x.uptimeMs ? since(Date.now() - x.uptimeMs) : ''}</td></tr>`).join('');
+    }
+
+    function viewers(s) {
+      const rows = (s.viewers || []).filter((v) => v.cameraId).sort((a, b) => a.addr.localeCompare(b.addr) || a.id - b.id);
+      const spread = (o, warn, bad) => (o ? `<span class="${cls(o.p95, warn, bad)}">${n(o.p50)} / ${n(o.p95)}</span>` : '<span class="dim">–</span>');
+      const head = '<tr><th class="l">Address</th><th class="l">Browser</th><th class="l">Camera</th><th class="l">Stream</th><th>Since</th><th>Queue</th><th>Skips</th><th>fps</th><th>Dropped</th><th>Decode q</th><th>Arrival ms</th><th>Screen ms</th><th>RTT ms</th><th class="l">Notes</th></tr>';
+      document.getElementById('viewers').innerHTML = head + (rows.length ? rows.map((v) => {
+        const r = v.report || {};
+        const notes = [r.software ? 'software decode' : '', r.visible === false ? 'hidden' : '', r.inputShed ? `shed ${r.inputShed}` : '', r.rebuilds ? `decoder rebuilt ${r.rebuilds}×` : ''].filter(Boolean).join(', ');
+        return `<tr><td>${esc(v.addr)}</td><td class="l" title="${esc(v.userAgent)}">${esc(browser(v.userAgent))}</td>
+          <td class="l">${esc(names[v.cameraId] || v.cameraId)}</td><td class="l">${esc(v.variant)}</td><td>${time(v.connectedAt)}</td>
+          <td class="${cls(v.queueMs, 250, 1000)}">${v.queueKB} KB · ${v.queueMs} ms</td><td class="${v.skips ? 'warn' : ''}">${v.skips}</td>
+          <td>${n(r.fps, 1)}</td><td class="${r.dropped ? 'warn' : ''}">${n(r.dropped)}</td><td class="${cls(r.decodeQueue, 10, 30)}">${n(r.decodeQueue)}</td>
+          <td>${spread(r.arrival, 300, 1000)}</td><td>${spread(r.render, 600, 1500)}</td><td>${n(r.rttMs)}</td><td class="l dim">${esc(notes)}</td></tr>`;
+      }).join('') : '<tr><td class="l dim" colspan="14">Nobody is watching.</td></tr>');
+    }
+
+    let paused = false, timer = 0, lastNames = 0;
+    document.getElementById('pause').onclick = (e) => { paused = !paused; e.target.textContent = paused ? 'Resume' : 'Pause'; if (!paused) poll(); };
+    async function poll() {
+      clearTimeout(timer);
+      if (paused) return;
+      try {
+        if (Date.now() - lastNames > 30000) { lastNames = Date.now(); await loadNames(); }
+        const r = await fetch('/api/stats?viewers=1&history=1');
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const s = await r.json();
+        tiles(s); streams(s); viewers(s);
+        const hist = s.history || [];
+        chart(document.getElementById('cpuChart'), [
+          { key: 'host', color: 'var(--accent)' }, { key: 'ff', color: 'var(--blue)' }, { key: 'app', color: 'var(--green)' },
+          { key: 'loop', color: 'var(--red)', right: true }], hist.map((h) => ({ ...h, host: h.host == null ? null : h.host * ((s.host && s.host.cores) || 1) })), { right: 20 });
+        chart(document.getElementById('netChart'), [
+          { key: 'rx', color: 'var(--blue)' }, { key: 'tx', color: 'var(--accent)' }, { key: 'viewers', color: 'var(--green)', right: true }], hist);
+        document.getElementById('updated').textContent = `Updated ${time(s.at || Date.now())} ET`;
+      } catch (err) {
+        document.getElementById('updated').textContent = `Not updating: ${err.message}`;
+      }
+      timer = setTimeout(poll, 2000);
+    }
+    poll();
+  </script>
+</body>
+</html>

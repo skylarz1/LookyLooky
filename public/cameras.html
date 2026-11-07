@@ -650,6 +650,28 @@
         height: auto !important;
       }
       .camera-card .video-wrap { aspect-ratio: 16 / 9; flex: none; }
+
+      .layout-selector { flex: 1 1 auto; min-width: 0; }
+      .layout-selector select { min-width: 0; flex: 1 1 auto; }
+      /* Fourteen layout buttons: one row that scrolls sideways. */
+      .view-modes { width: 100%; overflow-x: auto; flex-wrap: nowrap; padding-bottom: 2px; }
+      .view-modes button { flex: 0 0 36px; height: 36px; }
+      .sidebar-wrapper { height: auto; max-height: 30vh; }
+      /* Empty slots are drag-and-drop targets, which touch screens don't do. */
+      .grid .placeholder-card { display: none; }
+    }
+    /* Phones and tablets: the header and toolbar wrap instead of widening
+       the page (unwrapped they need 1086 px, so a phone or an upright iPad
+       zoomed the whole dashboard out to fit). */
+    @media (max-width: 1100px) {
+      header { flex-wrap: wrap; gap: 6px; padding: 6px 10px; }
+      .header-actions { flex-wrap: wrap; gap: 6px; }
+      .header-actions .btn { padding: 6px 10px; }
+      .toolbar { flex-wrap: wrap; gap: 8px; padding: 8px 10px; }
+      .toolbar > div[style*="flex:1"] { display: none; }
+    }
+    @media (max-width: 480px) {
+      #throughputIndicator { display: none !important; }
     }
   </style>
 </head>
@@ -688,6 +710,7 @@
       <button class="btn" onclick="showRecordingsModal()" title="Recordings">Recordings</button>
       <button class="btn" onclick="showScanModal()" title="Scan the network for cameras">Scan Network</button>
       <button class="btn primary" onclick="showAddModal()">+ Add Camera</button>
+      <a class="btn" href="/stats" target="_blank" rel="noopener" title="Server load, every stream and every viewer's delay" style="text-decoration:none;">Statistics</a>
       <a class="btn" href="/setup.html" target="_blank" rel="noopener" title="Certificates, browser support and viewer links" style="text-decoration:none;">Help</a>
       <button class="btn" onclick="showSettingsModal()" title="Settings" style="padding:6px 8px;">
         <!-- Gear -->
@@ -1383,10 +1406,36 @@
         // Seed a default layout locally (server returns one but handle defensively)
         layouts = [{ id: 'default', name: 'Default', gridType: '2x2', slots: {} }];
       }
+      // ?layout=<id or name> in the URL wins over the one this browser last used.
+      const want = (new URLSearchParams(location.search).get('layout') || '').trim().toLowerCase();
       const savedId = loadPrefs().activeLayoutId;
-      activeLayout = layouts.find(l => l.id === savedId) || layouts[0];
+      activeLayout = (want && layouts.find(l => l.id.toLowerCase() === want || l.name.toLowerCase() === want))
+        || layouts.find(l => l.id === savedId) || layouts[0];
       renderLayoutSelector();
       applyLayoutGridType();
+    }
+
+    /** Cameras the active layout shows, in slot order. */
+    function _layoutCameraIds() {
+      return Object.keys(activeLayout?.slots || {}).sort((a, b) => a - b)
+        .map((k) => activeLayout.slots[k]?.cameraId)
+        .filter((id) => id && cameras.some((c) => c.id === id));
+    }
+
+    /**
+     * Keep the address bar saying what this dashboard shows (layout and which
+     * camera is heard), so a copied link or a bookmark opens the same view.
+     * The same parameters work on /view and /wall.
+     */
+    function _syncUrl() {
+      const q = new URLSearchParams(location.search);
+      if (activeLayout) {
+        // The name reads better in a link; the id when two layouts share a name.
+        const unique = layouts.filter((l) => l.name.toLowerCase() === activeLayout.name.toLowerCase()).length === 1;
+        q.set('layout', unique ? activeLayout.name : activeLayout.id);
+      }
+      q.set('audio', globalMuted || globalVolume === 0 || !audioEnabledStream ? 'none' : audioEnabledStream);
+      try { history.replaceState(null, '', `${location.pathname}?${q}`); } catch { /* sandboxed frame */ }
     }
 
     function renderLayoutSelector() {
@@ -1417,6 +1466,7 @@
       renderLayoutSelector();
       _applyLayoutQuality();
       renderGrid();
+      _syncUrl();
     }
 
     async function newLayout() {
@@ -2290,6 +2340,7 @@
 
       savePrefs({ audioEnabledStream: cameraId });
       _syncGlobalMuteBtn();
+      _syncUrl();
     }
 
     /** Toggle mute — independent of the volume slider position. */
@@ -2300,6 +2351,7 @@
       savePrefs({ globalMuted });
       _applyGlobalAudio();
       _syncGlobalMuteBtn();
+      _syncUrl();
     }
 
     // Server's configured budget, from /api/info.  The per-browser override
@@ -4082,9 +4134,25 @@
       // the focal pane isn't pinned in the full-motion ranking (on a large
       // layout the one camera carrying audio can be demoted to a silent
       // thumbnail), and no audio plays until the user happens to click a pane.
-      if (audioEnabledStream && cameras.some((c) => c.id === audioEnabledStream)) {
-        _doSetFocalStream(audioEnabledStream);
-      }
+      //
+      // Which camera: ?audio= in the URL wins for this load (none | first |
+      // all | <camera id>).  Otherwise the camera this browser last listened
+      // to, but only if it is in this layout: a remembered camera that isn't
+      // on screen left the mute button showing sound on with nothing playing.
+      // Failing both, the layout's first camera (still muted unless unmuted).
+      const inLayout = _layoutCameraIds();
+      const urlAudio = (new URLSearchParams(location.search).get('audio') || '').trim();
+      if (urlAudio === 'none' || urlAudio === 'off') globalMuted = true;
+      else if (urlAudio) globalMuted = false;
+      let focal = null;
+      if (urlAudio && !['none', 'off', 'first', 'all', 'on'].includes(urlAudio)) focal = urlAudio;
+      else if (['first', 'all', 'on'].includes(urlAudio)) focal = inLayout[0];
+      else if (inLayout.includes(audioEnabledStream)) focal = audioEnabledStream;
+      else focal = inLayout[0];
+      if (focal && cameras.some((c) => c.id === focal)) _doSetFocalStream(focal);
+      if (urlAudio === 'all') for (const id of inLayout) if (id !== focal) cameraGrid.setPaneAudio(id, true);
+      _syncGlobalMuteBtn();
+      _syncUrl();
 
       setInterval(refreshCameras, 5000);
 

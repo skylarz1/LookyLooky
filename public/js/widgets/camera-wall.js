@@ -117,6 +117,12 @@ export default class CameraWall extends Widget {
         // today, and one who did not must never have a screen start talking at
         // them because somebody else did.
         this.muted = this.RestoreMuted();
+        // An `audio` option (wall.html passes ?audio=) wins for this page
+        // load without changing what is remembered: "none"/"off" starts
+        // muted, anything else ("first", "all", "on", a camera id) unmuted.
+        // The main pane is the only one with sound, so "all" means it too.
+        if (options.audio === "none" || options.audio === "off") this.muted = true;
+        else if (options.audio) this.muted = false;
 
         this.cameraTimer = null;
         this.layoutTimer = null;
@@ -597,6 +603,7 @@ export default class CameraWall extends Widget {
         // keeps it decoding -- a pane demoted to a thumbnail has no audio
         // graph at all.
         if (typeof grid._rerank === "function") grid._rerank();
+        if (typeof grid.syncSoundPrompt === "function") grid.syncSoundPrompt();
 
         const btn = this.Parent == null ? null : this.Parent.querySelector(".claudifer-mute");
         if (btn == null) return;

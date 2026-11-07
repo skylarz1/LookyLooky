@@ -33,7 +33,7 @@
 
 const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
-const { Fmp4Parser } = require('./fmp4');
+const { Fmp4Parser, inbandParamSets, buildHvcc, replaceHvcc, hevcCodecString } = require('./fmp4');
 const P = require('./protocol');
 const { inputArgs, friendlyError, redact, clearSession, noteMulticast, MULTICAST_RETRY_MS, reachable } = require('./sources');
 
@@ -85,7 +85,8 @@ class Pipeline extends EventEmitter {
       ? ['-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-profile:v', 'high',
         '-pix_fmt', 'yuv420p', '-g', String(Math.round(fps * 2)), '-bf', '0']
       : ['-c:v', 'copy'];
-    if (!transcode && probed && probed.videoCodec === 'hevc') videoCodec.push('-tag:v', 'hvc1');
+    // hev1 keeps the in-band VPS/SPS/PPS that hvc1 strips; see _onVideoInit.
+    if (!transcode && probed && probed.videoCodec === 'hevc') videoCodec.push('-tag:v', s.hevcInband ? 'hev1' : 'hvc1');
 
     const wc = settings.webcodecs;
     const args = ['-hide_banner', '-nostdin', '-loglevel', 'warning', ...input.args,
@@ -108,15 +109,20 @@ class Pipeline extends EventEmitter {
     const vp = new Fmp4Parser();
     vp.on('init', (init) => {
       const track = [...init.tracks.values()].find((t) => t.kind === 'video');
-      if (track) this.emit('video-init', track, init.raw);
+      if (track) this._onVideoInit(track, init.raw);
     });
     vp.on('fragment', (f) => {
       const nu = nowUs();
       let first = true;
       for (const smp of f.samples) {
         if (smp.kind !== 'video') continue;
+        let data = smp.data;
+        if (this.inbandInit) {
+          data = this._inbandSample(smp);
+          if (!data) continue;
+        }
         if (this.videoOffset === null) this.videoOffset = nu - smp.ptsUs;
-        this.emit('video-sample', smp.ptsUs + this.videoOffset, smp.isKey, smp.data, first ? f : null);
+        this.emit('video-sample', smp.ptsUs + this.videoOffset, smp.isKey, data, first ? f : null);
         first = false;
       }
     });
@@ -143,7 +149,12 @@ class Pipeline extends EventEmitter {
     }
 
     proc.stdio[2].on('data', (d) => {
-      this.stderrTail = (this.stderrTail + d.toString()).slice(-4000);
+      const text = d.toString();
+      this.stderrTail = (this.stderrTail + text).slice(-4000);
+      if (this.multicast) {
+        const gaps = (text.match(/RTP: missed \d+ packets/g) || []).length;
+        if (gaps) s._onMulticastLoss(this, gaps);
+      }
     });
     proc.on('error', (err) => { this.stderrTail += `\nspawn ${err.code || ''} ${err.message}`; });
     proc.on('close', (code, signal) => {
@@ -151,6 +162,42 @@ class Pipeline extends EventEmitter {
       s.manager.untrackProcess(proc);
       this.emit('exit', code, signal, this.stderrTail);
     });
+  }
+
+  /**
+   * An H.265 stream whose SDP has no VPS (seen on Uniview cameras) gets an
+   * hvcC no decoder accepts.  Tagged hvc1, FFmpeg also strips the VPS the
+   * camera sends in-band, so restart as hev1; as hev1, wait for the first
+   * keyframe and build the hvcC from its own VPS/SPS/PPS.
+   */
+  _onVideoInit(track, raw) {
+    if (track.codec !== 'hevc' || track.complete) { this.emit('video-init', track, raw); return; }
+    if (track.format !== 'hev1') {
+      this.session.hevcInband = true;
+      this.needsRestart = true;
+      this.session.log('H.265 without a VPS in the SDP — restarting with the in-band parameter sets kept');
+      this.kill();
+      return;
+    }
+    this.inbandInit = { track, raw };
+  }
+
+  /** A sample of an in-band-parameter-set stream, with the sets moved into the hvcC; null to drop it. */
+  _inbandSample(smp) {
+    if (!smp.isKey) return this.hevcRecord ? smp.data : null;
+    const ps = inbandParamSets(smp.data);
+    if (!ps) return this.hevcRecord ? smp.data : null;
+    let rec;
+    try { rec = buildHvcc(ps.vps, ps.sps, ps.pps); } catch (err) {
+      this.session.log(`in-band parameter sets unreadable: ${err.message}`);
+      return this.hevcRecord ? ps.rest : null;
+    }
+    if (!this.hevcRecord || !rec.equals(this.hevcRecord)) {
+      this.hevcRecord = rec;
+      const { track, raw } = this.inbandInit;
+      this.emit('video-init', { ...track, record: rec, complete: true, codecString: hevcCodecString(rec) }, replaceHvcc(raw, rec));
+    }
+    return ps.rest;
   }
 
   _onPcm(chunk) {
@@ -205,8 +252,10 @@ class StreamSession {
     this.idleTimer = null;
     this.lastVideoAt = 0;
     this.liveSince = 0;
-    this.stats = { bytesOut: 0, frames: 0, skips: 0, kicks: 0, restarts: 0, recycles: 0 };
-    this._bpsSample = { at: Date.now(), bytes: 0, frames: 0, bps: 0, fps: 0 };
+    this.stats = { bytesIn: 0, bytesOut: 0, frames: 0, skips: 0, kicks: 0, restarts: 0, recycles: 0, rtpGaps: 0 };
+    this.multicastLoss = [];        // times of recent RTP gaps while on multicast (_onMulticastLoss)
+    this._bpsSample = { at: Date.now(), bytes: 0, inBytes: 0, frames: 0, bps: 0, inBps: 0, fps: 0 };
+    this.ptsLagMs = null;
     this.watchdog = setInterval(() => this._watchdog(), 2000);
     this.watchdog.unref();
   }
@@ -299,12 +348,24 @@ class StreamSession {
     if (p !== this.active) return;
     this.active = null;
     if (this.state === 'idle' || this.state === 'stopped' || this.state === 'failed') return;
+    if (p.needsRestart) { this._spawn(); return; }  // H.265 switching to hev1 (Pipeline._onVideoInit)
 
     const why = friendlyError(tail) || (tail ? tail.trim().split('\n').pop() : null) || `FFmpeg exited (${signal || code})`;
     // No audio stream: retry immediately without the audio outputs.
     if (p.withAudio && /matches no streams|does not contain any stream/i.test(tail || '') && this.liveSince === 0) {
       this.audioAvailable = false;
       this.log('no audio track — restarting video only');
+      this._spawn();
+      return;
+    }
+    // Stream parameters were not found inside the short probe window
+    // (typically a long keyframe interval, or H.265 whose VPS only comes with
+    // the keyframe): retry once with a long probe.  Checked before multicast:
+    // packets did arrive, so multicast isn't what failed.
+    if (!this.slowProbe && this.liveSince === 0
+        && /dimensions not set|unspecified size|Could not find codec parameters|codec frame size is not set/i.test(tail || '')) {
+      this.slowProbe = true;
+      this.log('stream parameters not found in a short probe — retrying with a long one');
       this._spawn();
       return;
     }
@@ -348,15 +409,6 @@ class StreamSession {
     if (!this.forceTcp && this.liveSince === 0 && this.source && this.source.type === 'rtsp' && this.source.transport === 'udp') {
       this.forceTcp = true;
       this.log('no picture over UDP — switching this stream to TCP');
-      this._spawn();
-      return;
-    }
-    // Stream parameters were not found inside the short probe window
-    // (typically a long keyframe interval): retry once with a long probe.
-    if (!this.slowProbe && this.liveSince === 0
-        && /dimensions not set|unspecified size|Could not find codec parameters|codec frame size is not set/i.test(tail || '')) {
-      this.slowProbe = true;
-      this.log('stream parameters not found in a short probe — retrying with a long one');
       this._spawn();
       return;
     }
@@ -419,8 +471,31 @@ class StreamSession {
     const s = this._bpsSample, dt = (now - s.at) / 1000;
     if (dt >= 2) {
       s.bps = (this.stats.bytesOut - s.bytes) / dt; s.fps = (this.stats.frames - s.frames) / dt;
-      s.at = now; s.bytes = this.stats.bytesOut; s.frames = this.stats.frames;
+      s.inBps = (this.stats.bytesIn - s.inBytes) / dt;
+      s.at = now; s.bytes = this.stats.bytesOut; s.inBytes = this.stats.bytesIn; s.frames = this.stats.frames;
     }
+  }
+
+  /**
+   * Multicast is plain UDP: a lost packet corrupts the picture until the
+   * next keyframe (green smears on H.265, which is seconds on a camera with a
+   * long keyframe interval).  Seen on the Uniview cameras, whose groups lose
+   * packets on the way while every Dahua group arrives whole.  A stream that
+   * loses packets three times in a minute moves to unicast TCP for a while,
+   * make-before-break, so viewers see no gap.
+   */
+  _onMulticastLoss(p, gaps) {
+    this.stats.rtpGaps += gaps;
+    if (p !== this.active || this.pending) return;
+    const now = Date.now();
+    this.multicastLoss = this.multicastLoss.filter((t) => now - t < 60000);
+    for (let i = 0; i < gaps; i++) this.multicastLoss.push(now);
+    if (this.multicastLoss.length < 3) return;
+    this.multicastLoss = [];
+    this.noMulticastUntil = now + MULTICAST_RETRY_MS;
+    noteMulticast(`${this.cameraId}/${this.label}`, false);
+    this.log('multicast is losing packets (3 gaps in a minute) — switching this stream to unicast');
+    this._recycle();
   }
 
   /** Make-before-break: warm a replacement, switch at its first keyframe. */
@@ -486,6 +561,11 @@ class StreamSession {
     }
     const msg = P.videoChunk(pts, isKey, data);
     this.stats.frames++;
+    this.stats.bytesIn += data.length;
+    // How far behind the server clock this frame's PTS is as it goes out.
+    // Viewers report delays against the same PTS; subtracting this leaves
+    // only the server -> viewer part (camera clock drift cancels out).
+    this.ptsLagMs = (nowUs() - pts) / 1000;
 
     // GOP cache for late joiners
     if (isKey) { this.gop = []; this.gopRaw = []; this.gopBytes = 0; this.gopOverflow = false; }
@@ -572,6 +652,10 @@ class StreamSession {
       videoCodec: this.track?.codec || v.videoCodec || null, width: this.track?.width || null, height: this.track?.height || null,
       audio: this.audioConfigMsg ? 'opus' : (this.audioAvailable === false ? 'none' : null),
       kbps: Math.round((this._bpsSample.bps * 8) / 1000), fps: Math.round(this._bpsSample.fps * 10) / 10,
+      inKbps: Math.round((this._bpsSample.inBps * 8) / 1000), multicast: !!this.active?.multicast,
+      ptsLagMs: this.ptsLagMs == null ? null : Math.round(this.ptsLagMs),
+      cpuPct: this.manager.metrics?.pidCpu.get(this.active?.proc?.pid) ?? null,
+      rss: this.manager.metrics?.pidRss.get(this.active?.proc?.pid) ?? null,
       gopFrames: this.gop.length, lastError: this.lastError, ...this.stats,
     };
   }

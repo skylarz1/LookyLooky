@@ -20,6 +20,7 @@ const { Store, parseImport, DATA_DIR } = require('./config');
 const { CameraManager } = require('./cameras');
 const { Recorder } = require('./recordings');
 const { StreamHub } = require('./ws-server');
+const { Metrics } = require('./metrics');
 const { Router, sendError, sendFile, checkAuth, cors } = require('./http-util');
 const api = require('./api');
 const legacy = require('./legacy-proxy');
@@ -36,6 +37,8 @@ const recorder = new Recorder(manager);
 const allowed = String(process.env.LOOKY_ALLOWED_ORIGINS || '*').split(',').map((s) => s.trim());
 const hub = new StreamHub(manager, { allowedOrigins: allowed });
 manager.hub = hub;
+const metrics = new Metrics(manager, hub);
+manager.metrics = metrics;
 
 const info = {
   startedAt: Date.now(),
@@ -46,7 +49,7 @@ const info = {
 
 const router = new Router();
 legacy.register(router, manager);
-const { importFiles } = api.register(router, { store, manager, recorder, hub, info });
+const { importFiles } = api.register(router, { store, manager, recorder, hub, info, metrics });
 
 /* --- first boot: seed from the mounted config folder ----------------------- */
 
@@ -81,9 +84,9 @@ const ALIASES = {
   '/': '/index.html',
   '/cameras.htm': '/cameras.html', '/dashboard': '/cameras.html',
   '/camera-view.htm': '/camera-view.html', '/view.html': '/camera-view.html', '/view': '/camera-view.html',
-  '/wall': '/wall.html', '/setup': '/setup.html', '/camera-1.htm': '/camera-1.html',
+  '/wall': '/wall.html', '/setup': '/setup.html', '/camera-1.htm': '/camera-1.html', '/stats': '/stats.html',
 };
-const ADMIN_PAGES = new Set(['/cameras.html']);
+const ADMIN_PAGES = new Set(['/cameras.html', '/stats.html']);
 
 function templ(text) {
   return text

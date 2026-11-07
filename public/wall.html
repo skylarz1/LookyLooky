@@ -1,6 +1,8 @@
 <!DOCTYPE html>
 <!--
-  LookyLooky camera wall, standalone: /wall.html?layout=<id or name>[&camera=<id>][&storyid=…]
+  LookyLooky camera wall, standalone: /wall.html?layout=<id or name>[&camera=<id>][&audio=none|first|<id>][&quality=high|low][&storyid=…]
+  audio: none starts muted, first unmutes the main pane, a camera id puts that camera up unmuted;
+  without it the wall remembers the last mute choice in this browser.
 
   The 7f wall (one main pane, up to six previews; tap a preview to put it up; audio follows the main
   pane). Embed it in another stack with an iframe and drive it over postMessage:
@@ -50,9 +52,10 @@
         try { chosen = ((await (await fetch('/api/layouts')).json()).layouts || [])[0]?.id || 'default'; }
         catch { chosen = 'default'; }
       }
-      const wall = new CameraWall({ id: 'wall', layout: chosen, storyid: storyid ?? undefined, quality: q.get('quality') || '' });
+      const audio = (q.get('audio') || '').trim();
+      const wall = new CameraWall({ id: 'wall', layout: chosen, storyid: storyid ?? undefined, quality: q.get('quality') || '', audio });
       window.__claudiferWall = wall;
-      const cam = q.get('camera');
+      const cam = q.get('camera') || (audio && !['none', 'off', 'first', 'all', 'on'].includes(audio) ? audio : null);
       if (cam) {
         // Wait for the first build, then put the requested camera up.
         const t = setInterval(() => { if (wall.grid) { clearInterval(t); wall.Select(cam); } }, 200);

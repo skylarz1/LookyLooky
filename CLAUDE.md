@@ -196,11 +196,18 @@ retrying (someone is watching it). To check a camera, open it, or fetch
   `https://looky.local` and `https://<IP>` serve LookyLooky's own
   certificate (same CA as before); WebSocket upgrade, API auth, snapshots
   pass through; `looky.local` answers mDNS on the main LAN.
-- **cam-32 / cam-33 substreams (Uniview, H.265) fail** with "video parse:
-  Attempt to access memory outside buffer bounds": their SDP has SPS/PPS but
-  no VPS (`sprop-vps` missing), so the hvcC FFmpeg writes is unusable. A
-  camera reboot didn't change it. Don't change camera codecs without the
-  owner's OK.
+- **cam-32 / cam-33 (Uniview, H.265)** have SPS/PPS but no VPS in their SDP;
+  they send all three in-band before each keyframe. Tagged hvc1, FFmpeg
+  writes an empty hvcC and strips the in-band sets. Fixed in code
+  (2026-11-07): such streams run as hev1 and the pipeline builds the hvcC
+  from the first keyframe (`fmp4.js`, `test/hevc.js`). All four streams then
+  played over multicast at 15 fps. Their short probe can fail ("unspecified
+  size"); the long-probe retry now runs before the multicast fallback.
+  Decoding in a real browser was not checked yet. Don't change camera codecs
+  without the owner's OK.
+- **Every camera delivers 15 fps** (measured 2026-11-07), except Lobby1 (30)
+  and cam-18 (6). The 25 fps in the dev instance is its generated test
+  pattern.
 
 ## Not verified yet (do these first on the owner's hardware)
 

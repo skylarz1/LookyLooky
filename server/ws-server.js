@@ -11,6 +11,8 @@
  *   { action: 'audio', enabled: bool }       start/stop sending audio to this pane
  *   { action: 'subscribeThumb', cameraId }   JPEG thumbnail tier
  *   { action: 'unsubscribeThumb' }
+ *   { action: 'ping', c? }                   pong carries `mono`, the server clock video PTS use (ms)
+ *   { action: 'report', fps, dropped, … }     what the pane got, every 5 s (statistics page)
  *
  * Server → client: JSON acks ({ type:'subscribed' | 'error', … }) and the
  * binary messages in protocol.js.  A socket that never subscribes is fine:
@@ -22,12 +24,32 @@ const P = require('./protocol');
 const { SOFT_CAP, HARD_CAP } = require('./stream-session');
 
 const THUMB_CAP = 512 * 1024;
+const nowMs = () => Number(process.hrtime.bigint() / 1000n) / 1000;  // stream-session's PTS clock
+let nextId = 1;
+
+/** A viewer's report, reduced to the fields and types the statistics page shows. */
+function cleanReport(msg) {
+  const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const spread = (o) => (o && typeof o === 'object' ? { p50: num(o.p50), p95: num(o.p95), max: num(o.max) } : null);
+  const out = { at: Date.now() };
+  for (const k of ['fps', 'dropped', 'decodeQueue', 'videoQueue', 'reanchors', 'inputShed', 'pausedDrops', 'rebuilds', 'rttMs']) out[k] = num(msg[k]);
+  out.software = msg.software === true;
+  out.visible = msg.visible !== false;
+  out.arrival = spread(msg.arrival);
+  out.render = spread(msg.render);
+  return out;
+}
 
 class Viewer {
   constructor(ws, hub, req) {
     this.ws = ws;
     this.hub = hub;
+    this.id = nextId++;
     this.addr = req.socket.remoteAddress;
+    this.forwardedFor = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || null;
+    this.userAgent = String(req.headers['user-agent'] || '').slice(0, 200);
+    this.skips = 0;
+    this.report = null;
     this.session = null;
     this.thumb = null;
     this.configSent = false;
@@ -73,6 +95,7 @@ class Viewer {
       this.skipping = false;
     } else if (buffered > SOFT_CAP) {
       this.skipping = true;
+      this.skips++;
       session.stats.skips++;
       return;
     }
@@ -87,6 +110,34 @@ class Viewer {
   sendJpeg(msg) {
     if (this.ws.bufferedAmount > THUMB_CAP) return;
     this.send(msg);
+  }
+
+  /**
+   * For /api/stats.  `queueMs` is the socket backlog in time at the stream's
+   * bitrate: the lag this server is adding.  The delays from the viewer's
+   * report have the stream's own input delay (ptsLagMs) taken off, so they
+   * are server -> arrival and server -> screen.
+   */
+  info() {
+    const s = this.session;
+    const r = this.report && Date.now() - this.report.at < 15000 ? this.report : null;
+    const buffered = this.ws.bufferedAmount;
+    const bps = s ? s._bpsSample.bps / Math.max(1, s.clients.size) : 0;
+    const minus = (spread) => {
+      if (!spread || s?.ptsLagMs == null) return null;
+      const o = {};
+      for (const k of ['p50', 'p95', 'max']) o[k] = spread[k] == null ? null : Math.round(spread[k] - s.ptsLagMs);
+      return o;
+    };
+    return {
+      id: this.id, addr: this.forwardedFor || this.addr, userAgent: this.userAgent,
+      connectedAt: this.connectedAt, cameraId: s?.cameraId || (this.thumb ? this.thumb.cameraId : null),
+      variant: s ? s.label : (this.thumb ? 'thumb' : null),
+      bytesOut: this.bytesOut, queueKB: Math.round(buffered / 1024),
+      queueMs: bps > 0 ? Math.round((buffered / bps) * 1000) : 0,
+      skipping: this.skipping, skips: this.skips,
+      report: r && { ...r, arrival: minus(r.arrival), render: minus(r.render) },
+    };
   }
 
   unsubscribe() {
@@ -138,7 +189,10 @@ class Viewer {
         this.unsubscribe();
         break;
       case 'ping':
-        this.json({ type: 'pong', t: Date.now() });
+        this.json({ type: 'pong', t: Date.now(), mono: nowMs(), c: typeof msg.c === 'number' ? msg.c : undefined });
+        break;
+      case 'report':
+        this.report = cleanReport(msg);
         break;
       default:
         break;

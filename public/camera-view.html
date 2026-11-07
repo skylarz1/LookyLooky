@@ -1,9 +1,9 @@
 <!DOCTYPE html>
 <!--
   LookyLooky view-only board (the Claudifer viewer), served at
-  /camera-view.html?layout=<id or name> (also /view). Streams connect to
-  /cameras/stream on this server, and a browser without WebCodecs gets a thumbnail-only board with a banner
-  instead of a black page.
+  /camera-view.html?layout=<id or name>[&quality=high|low][&audio=none|first|all|<camera id>] (also /view).
+  Streams connect to /cameras/stream on this server, and a browser without WebCodecs gets a thumbnail-only
+  board with a banner instead of a black page. audio: which cameras are heard (default none).
 -->
 <html lang="en">
 <head>
@@ -49,6 +49,28 @@
     /* Hover controls are never built on this page, but a stale rule would
        still reserve space / catch clicks.  Belt and braces. */
     #viewGrid .hover-controls { display: none !important; }
+
+    /* A phone held upright.  A layout's grid is shaped for a wall display;
+       squeezed into a 390-px-wide screen its panes become tall black boxes
+       with the picture a strip in the middle.  Instead: 16:9 panes two
+       across, the layout's large pane(s) full width, and the board scrolls. */
+    @media (max-width: 640px) and (orientation: portrait) {
+      #viewGrid {
+        grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+        grid-template-rows: none !important;
+        grid-auto-rows: auto;
+        align-content: start;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+      }
+      #viewGrid > .camera-card { grid-column: auto !important; grid-row: auto !important; aspect-ratio: 16 / 9; }
+      #viewGrid.layout-1x1 > .camera-card,
+      #viewGrid:is(.layout-6f, .layout-7f, .layout-8f, .layout-10f, .layout-10d, .layout-14d) > .camera-card:first-child,
+      #viewGrid:is(.layout-10d, .layout-14d) > .camera-card:nth-child(2),
+      #viewGrid.layout-13f > .camera-card:nth-child(5),
+      #viewGrid.layout-17f > .camera-card:nth-child(6) { grid-column: 1 / -1 !important; }
+      #viewGrid > .placeholder-card { display: none; }
+    }
 
     .view-message {
       position: fixed;
@@ -214,6 +236,18 @@
 
       grid.setLayout(layout, cameras);
       setInterval(refresh, POLL_MS);
+
+      // ?audio=none|first|all|<camera id>: what the board plays.  Without it
+      // a board stays silent, as before.  The browser still waits for a tap
+      // before any sound; the grid shows "Tap for sound" until then.
+      const audio = (new URLSearchParams(location.search).get('audio') || '').trim();
+      if (audio && audio !== 'none' && audio !== 'off') {
+        const inLayout = Object.values(layout.slots || {}).map((s) => s && s.cameraId)
+          .filter((id) => id && cameras.some((c) => c.id === id));
+        const focal = ['first', 'all', 'on'].includes(audio) ? inLayout[0] : audio;
+        if (focal) grid.setFocusedCamera(focal, 1, false);
+        if (audio === 'all') for (const id of inLayout) if (id !== focal) grid.setPaneAudio(id, true);
+      }
 
       // Pick up layout edits made on the dashboard without needing a reload.
       setInterval(async () => {
