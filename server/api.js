@@ -10,15 +10,15 @@ const fs = require('fs');
 const path = require('path');
 const { sendJson, sendError, readJson, sse, sendFile, checkAuth } = require('./http-util');
 const { normaliseCamera, normaliseLayout, parseImport, slugify, defaultLayout, DATA_DIR } = require('./config');
-const { probe } = require('./probe');
-const { discover } = require('./onvif');
+const { probe, multicastSetup } = require('./probe');
+const { discover, lookupMulticast, streamKey, sharedGroups } = require('./onvif');
 const { scan } = require('./scan');
 const { redact, hostOf } = require('./sources');
 
 const VERSION = require('../package.json').version;
 
 function register(router, ctx) {
-  const { store, manager, recorder, hub, info } = ctx;
+  const { store, manager, recorder, hub, info, metrics } = ctx;
   const admin = (fn) => async (req, res, params, url) => {
     if (!checkAuth(req, res)) return;
     return fn(req, res, params, url);
@@ -43,17 +43,24 @@ function register(router, ctx) {
     });
   });
 
-  router.get('/api/stats', (req, res) => {
+  /** ?viewers=1 adds every connected viewer, ?history=1 the last 30 min of host samples. */
+  router.get('/api/stats', (req, res, params, url) => {
     const st = manager.stats();
+    const q = url ? url.searchParams : new URLSearchParams();
+    if (q.has('viewers') && !checkAuth(req, res)) return;  // addresses and browsers: admin only
     sendJson(res, 200, {
+      at: Date.now(),
       activeStreams: st.activeStreams,
       totalClients: hub.viewers.size,
       memory: { app: process.memoryUsage(), ffmpeg: manager.ffmpegMemory() },
       uptime: process.uptime(),
       processes: st.processes,
+      host: metrics ? metrics.latest : null,
       sessions: st.sessions,
       mjpeg: st.mjpeg,
       recording: recorder.activeInfo(),
+      viewers: q.has('viewers') ? [...hub.viewers].map((v) => v.info()) : undefined,
+      history: q.has('history') && metrics ? metrics.history : undefined,
     });
   });
 
@@ -66,7 +73,7 @@ function register(router, ctx) {
     return Promise.all(cam.sources.map(async (src) => {
       const r = await probe(src, store.settings, { key: `${cam.id}/${src.label}`, timeoutMs: 12000 });
       if (r.ok) manager.updateVariant(cam.id, src.label, { ...r, probedAt: Date.now() });
-      return { label: src.label, ok: r.ok, error: r.error || null, width: r.width || null, height: r.height || null, videoCodec: r.videoCodec || null, audioCodec: r.audioCodec || null };
+      return { label: src.label, ok: r.ok, error: r.error || null, note: r.note || null, multicast: !!r.multicast, width: r.width || null, height: r.height || null, videoCodec: r.videoCodec || null, audioCodec: r.audioCodec || null };
     }));
   }
 
@@ -135,17 +142,17 @@ function register(router, ctx) {
 
   async function batchOne(item, group, emit) {
     const key = item.key || item.ip;
-    const transport = item.transport === 'udp' ? 'udp' : 'tcp';
+    const transport = ['udp', 'multicast'].includes(item.transport) ? item.transport : 'tcp';
     let sources = Array.isArray(item.sources) && item.sources.length
-      ? item.sources.map((s) => ({ label: s.label, url: s.url, transport: s.transport || transport })) : null;
+      ? item.sources.map((s) => ({ label: s.label, url: s.url, transport: s.transport || transport, multicastUrl: s.multicastUrl })) : null;
     let note = null;
     if (!sources && item.user) {
       emit('item', { key, stage: 'discovering' });
       try {
         const d = await discover({ host: item.ip, port: item.onvifPort || 80, user: item.user, pass: item.pass });
         if (d.suggested.main) {
-          sources = [{ label: 'main', url: d.suggested.main, transport }];
-          if (d.suggested.sub) sources.push({ label: 'sub', url: d.suggested.sub, transport });
+          sources = [{ label: 'main', url: d.suggested.main, transport, multicastUrl: d.suggested.mainMulticast || undefined }];
+          if (d.suggested.sub) sources.push({ label: 'sub', url: d.suggested.sub, transport, multicastUrl: d.suggested.subMulticast || undefined });
         }
       } catch (err) {
         note = `ONVIF: ${err.message}`;
@@ -290,6 +297,72 @@ function register(router, ctx) {
     } catch (err) {
       sendJson(res, 200, { error: err.message, streams: [] });
     }
+  }));
+
+  /**
+   * Multicast for cameras already set up.  Body:
+   *   { ids?: [...] (default every camera with an RTSP stream), onvifPort?: 80,
+   *     enable?: false (true also switches the streams that can use it to transport 'multicast') }
+   * Each RTSP stream is checked twice: over ONVIF (its multicast URI and the
+   * group configured there) and by asking the camera for it in RTSP (the
+   * group it really sends to, or why it won't; probe.js).  Streams on
+   * another stream's group and port are reported as `shared` and never
+   * switched: every receiver of that group would get both streams mixed.
+   * ONVIF's multicast URI is stored when it is a different stream address
+   * and the camera accepted it.  Answers { results: [{ id, name, onvifError?,
+   * sources: [{label, matched, profileName, multicast, rtsp, shared, changed}] }] }.
+   */
+  router.post('/api/multicast/lookup', admin(async (req, res) => {
+    const b = await readJson(req);
+    const wanted = Array.isArray(b.ids) && b.ids.length ? new Set(b.ids.map(String)) : null;
+    const cams = store.cameras.filter((c) => (!wanted || wanted.has(c.id))
+      && c.sources.some((s) => s.type === 'rtsp'));
+    const port = Number(b.onvifPort) || 80;
+    const checked = [];
+    let next = 0;
+    const worker = async () => {
+      while (next < cams.length) {
+        const cam = cams[next++];
+        let found = null, onvifError = null;
+        try { found = await lookupMulticast(cam, { port }); } catch (err) { onvifError = err.message; }
+        const streams = [];
+        for (const src of cam.sources.filter((s) => s.type === 'rtsp')) {
+          const f = (found && found.sources.find((x) => x.label === src.label)) || null;
+          const onvifUrl = f && f.multicast && f.multicast.rtspUrl;
+          // ONVIF's multicast URI when it names another stream address, else the stored one.
+          const multicastUrl = onvifUrl && streamKey(onvifUrl) !== streamKey(src.url) ? onvifUrl : src.multicastUrl;
+          streams.push({ src, f, multicastUrl, rtsp: await multicastSetup({ ...src, multicastUrl }, store.settings) });
+        }
+        checked.push({ cam, onvifError, streams });
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(6, cams.length) }, worker));
+    checked.sort((a, b2) => store.cameras.indexOf(a.cam) - store.cameras.indexOf(b2.cam));
+
+    const shared = sharedGroups(checked.flatMap(({ cam, streams }) => streams.filter((s) => s.rtsp.ok)
+      .map((s) => ({ key: `${cam.id}/${s.src.label}`, address: s.rtsp.address, port: s.rtsp.port }))));
+    const results = checked.map(({ cam, onvifError, streams }) => {
+      const r = { id: cam.id, name: cam.name, sources: [] };
+      if (onvifError) r.onvifError = onvifError;
+      let changed = false;
+      const sources = cam.sources.map((src) => {
+        const s = streams.find((x) => x.src === src);
+        if (!s) return src;
+        const out = { ...src };
+        const others = shared.get(`${cam.id}/${src.label}`) || [];
+        if (s.rtsp.ok && s.multicastUrl && s.multicastUrl !== src.multicastUrl) out.multicastUrl = s.multicastUrl;
+        if (b.enable && s.rtsp.ok && !others.length) out.transport = 'multicast';
+        const c = JSON.stringify(out) !== JSON.stringify(src);
+        changed = changed || c;
+        r.sources.push({ label: src.label, matched: s.f ? s.f.matched : null, profileName: s.f ? s.f.profileName : null,
+          multicast: s.f && s.f.multicast ? { ...s.f.multicast, rtspUrl: s.f.multicast.rtspUrl ? redact(s.f.multicast.rtspUrl) : '' } : null,
+          rtsp: s.rtsp, shared: others, changed: c });
+        return out;
+      });
+      if (changed) manager.update(cam.id, { sources });
+      return r;
+    });
+    sendJson(res, 200, { results });
   }));
 
   router.get('/api/scan', admin(async (req, res, params, url) => {

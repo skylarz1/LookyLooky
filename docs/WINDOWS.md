@@ -107,3 +107,4 @@ Run these in PowerShell in the project folder:
 - **The iPad can't load the page:** check the firewall (step 7), or the iPad may be on a guest Wi-Fi.
 - **"port is already allocated":** something else uses 8080 or 8443. Change the left-hand numbers under `ports:`, e.g. `"9443:8443"`, and set `LOOKY_PUBLIC_HTTPS_PORT: "9443"`.
 - **Typed `http://` by mistake:** both ports send you to the secure page by themselves.
+- **Multicast cameras take about 8 s to start, and the log says "no picture over multicast":** expected on Docker Desktop. Its VM sits behind NAT, so multicast from the cameras can't reach the container, and each stream switches to normal TCP by itself. To really use multicast, run LookyLooky on a Linux machine with `network_mode: host` (see README, "Multicast"), or set the cameras back to TCP.

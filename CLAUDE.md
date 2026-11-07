@@ -39,8 +39,10 @@ server/ws-server.js       /cameras/stream: subscribe {cameraId, quality, audio:'
 server/mjpeg.js           thumbnails/MJPEG/snapshots decoded from the running session's fMP4 (no extra camera connection)
 server/cameras.js         camera list/status, sessions, keep-warm, recycle, stray reaping, probing
 server/api.js             REST API (see README)    server/config.js  persistence, defaults, XML/JSON import parsers
-server/sources.js         FFmpeg input args per URL type, HTTP session-cookie login, friendly error messages
-server/recordings.js  onvif.js  scan.js  probe.js  tls.js (local CA)  legacy-proxy.js (camera-proxy endpoints)
+server/sources.js         FFmpeg input args per URL type (incl. RTSP multicast + its fallback memory), HTTP session-cookie
+                          login, friendly error messages
+server/onvif.js           ONVIF discovery (stream URIs, multicast URIs and groups) and lookupMulticast for existing cameras
+server/recordings.js  scan.js  probe.js  tls.js (local CA)  legacy-proxy.js (camera-proxy endpoints)
 public/js/camera/         viewer.js (CameraGrid/CameraPane: tiers, budget, zoom, quality, per-pane audio),
                           webcodecsClient.js, audioWorkletProcessor.js — see public/js/camera/README.md
 public/js/widgets/camera-wall.js   the wall widget (story mode via noodleman, or fixed layout)
@@ -52,6 +54,8 @@ public/styles/camera-viewer.css    full-page styles; camera-wall.css is the SAME
 config/                   first-boot seed. Real cameras.xml / camera-layouts.xml contain camera passwords: git-ignored,
                           never commit them. Only *.example.xml are tracked.
 test/e2e.js               browser smoke test     test/features.js  multi-audio, zoom, quality, per-pane speakers
+test/onvif.js             fake ONVIF camera: multicast discovery/lookup, FFmpeg args, fallback memory (no instance needed)
+test/network.js           unreachable cameras: the TCP knock, STREAM_PROBLEM, wait-then-restart (no instance needed)
 ```
 
 ## Rules
@@ -106,6 +110,46 @@ test/e2e.js               browser smoke test     test/features.js  multi-audio, 
   drag-drop, wall main change, fullscreen focus).
 - **Quality precedence:** decoder overload, then pane HQ/LQ button, then
   view override, then server policy (default `'sub'`, substreams only).
+- **Multicast falls back to unicast, and remembers it** (`sources.js`):
+  - no picture within 8 s, or two stalls in 15 minutes (a switch without an
+    IGMP querier) → unicast;
+  - that stream then skips multicast for an hour; Recycle clears this;
+  - `transport: 'multicast'` falls back to TCP; with the global `prefer`, a
+    `udp` source falls back to UDP;
+  - `multicastUrl` is only for cameras whose multicast RTSP address
+    differs. Most negotiate multicast on the normal URL in SETUP.
+  - Not when the camera doesn't answer on its RTSP port at all
+    (`reachable()`): an unplugged camera is not a multicast failure. The
+    UDP→TCP switch is skipped for the same reason.
+  - The lookup never switches a stream whose group and port another stream
+    also uses (the packets would arrive mixed). The global `prefer` setting
+    doesn't check that; it's documented, not enforced.
+
+  It never works on Docker Desktop, so the default stays TCP and multicast
+  is opt-in.
+- **No picture → a cover that says why, never a frozen frame** (owner's
+  request after the 2026-11-06 LAN outage):
+  - **Every FFmpeg start also knocks on the camera's port** (`probeHost`,
+    3 s). On "unreachable" the FFmpeg is killed at once: FFmpeg itself takes
+    up to 25 s to give up.
+  - **An unreachable camera is waited for, not retried.** The session knocks
+    every 5 s and starts FFmpeg only when the camera answers. That is not
+    counted as restarts and never gives up while someone watches. Don't put
+    it back on the restart backoff: that was the 30-second FFmpeg churn of
+    the outage.
+  - **"The camera network is down"** = no other camera playing and up to four
+    other camera hosts unreachable (`cameraNetworkDown`, cached 10 s). A
+    "refused" host counts as reachable.
+  - **`STREAM_PROBLEM` (0x0A) is sent after `STREAM_ERROR`**, so old
+    clients still get the text, and new ones ignore unknown types. It
+    carries the problem's *age*, not a timestamp, so the client's clock
+    places "since". It is re-sent after every failed start (`force`): a
+    restart that got as far as the stream header told clients 'streaming'.
+  - **"since" is when the picture was lost** (`lostAt`: last video, or the
+    first failed start), kept across retries. An idle stop forgets it.
+  - **The pane shows its own "Lost the connection to LookyLooky"** after
+    10 s with the socket closed. Short reconnects are routine.
+  - Overlay element ids use the `np-` prefix; `sp-` is the speaker button.
 - **Audio:**
   - One focused pane follows the master mute/volume.
   - Pane speakers add more, at master volume, ignoring the master mute.
@@ -151,10 +195,66 @@ test/e2e.js               browser smoke test     test/features.js  multi-audio, 
   owner saw stalled-looking panes and asked for a clear network error
   instead.
 
+- **Multicast (branch `claude/new-session-iqef3y`):** checked against
+  mediamtx serving RTP multicast:
+  - LookyLooky on host networking gets the stream over multicast
+    (`delivery: "multicast"`);
+  - with multicast blocked (iptables), it switches to unicast after 8 s and
+    the next cold start goes straight to unicast;
+  - `test/onvif.js` covers discovery against a fake ONVIF camera.
+
+- **Multicast with the owner's real cameras (2026-11-06, laptop wired onto
+  the camera network, Docker Desktop):**
+  - **ONVIF's multicast group is not what the cameras send to.** Dahua
+    cameras report e.g. 224.1.0.0 (or 0.0.0.0) over ONVIF, then answer the
+    RTSP SETUP with their web-page default, **224.1.2.4, same ports on every
+    camera** (main 40000, sub 40016). That's why the lookup also asks RTSP
+    (`multicastSetup` in `probe.js`) and flags shared groups
+    (`sharedGroups`). Of 35: 18 share 224.1.2.4, a few more share other
+    groups (one model sends main and sub to the same group and port), 5 have
+    their own group, 1 answers 404 on ONVIF's multicast URL, 3 accept
+    multicast but have no address set, UniFi Protect drops the connection.
+  - **The LAN carries it:** FFmpeg on Windows, outside Docker, joined
+    224.1.2.4 on the wired adapter (`udp://…?localaddr=`) and got the
+    packets at once. FFmpeg's own RTSP multicast pull got nothing, because
+    Windows joined on another adapter (multicast route metric tie with the
+    Npcap loopback), and FFmpeg's RTSP client has no option to pick one.
+  - **Docker Desktop:** `no picture over multicast — switching this stream to
+    unicast` after 10 s, as expected.
+  - Not yet seen: a stream actually playing over multicast through
+    LookyLooky (needs a Linux host on the camera network), and IGMP
+    querier behaviour on the owner's switches.
+
 Reading `/api/cameras`: `status: running` means *enabled*, not *connected*.
 Streams start on demand, and `lastError` only shows while a stream is
 retrying (someone is watching it). To check a camera, open it, or fetch
 `/stream/<id>/snapshot` (504 with a reason after 12 s if it can't connect).
+
+## Verified on the pve5 VM (2026-11-07, Ubuntu 24.04, Docker Engine, host networking)
+
+- **Multicast plays end to end**: substreams of cam-02 and cam-24 (Dahua)
+  and cam-30 (Uniview) delivered `multicast`, each FFmpeg joined its own
+  `229.1.2.x` group on the camera NIC. Needs the netplan route
+  `229.0.0.0/8` on the camera interface (default route is the main LAN).
+- The cameras now use one scheme, set on 2026-11-06: main
+  `229.1.1.<last octet>:11111`, sub `229.1.2.<last octet>:22222`.
+- **EE edge proxy in front** (`docker-compose.host.yml`, README "Linux host
+  ..."): `http://looky.local` and `http://<IP>` redirect to https;
+  `https://looky.local` and `https://<IP>` serve LookyLooky's own
+  certificate (same CA as before); WebSocket upgrade, API auth, snapshots
+  pass through; `looky.local` answers mDNS on the main LAN.
+- **cam-32 / cam-33 (Uniview, H.265)** have SPS/PPS but no VPS in their SDP;
+  they send all three in-band before each keyframe. Tagged hvc1, FFmpeg
+  writes an empty hvcC and strips the in-band sets. Fixed in code
+  (2026-11-07): such streams run as hev1 and the pipeline builds the hvcC
+  from the first keyframe (`fmp4.js`, `test/hevc.js`). All four streams then
+  played over multicast at 15 fps. Their short probe can fail ("unspecified
+  size"); the long-probe retry now runs before the multicast fallback.
+  Decoding in a real browser was not checked yet. Don't change camera codecs
+  without the owner's OK.
+- **Every camera delivers 15 fps** (measured 2026-11-07), except Lobby1 (30)
+  and cam-18 (6). The 25 fps in the dev instance is its generated test
+  pattern.
 
 ## Not verified yet (do these first on the owner's hardware)
 

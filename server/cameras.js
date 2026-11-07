@@ -16,7 +16,9 @@ const { StreamSession } = require('./stream-session');
 const { MjpegSession } = require('./mjpeg');
 const { probe } = require('./probe');
 const { normaliseCamera, ID_RE } = require('./config');
-const { hostOf, clearAllSessions } = require('./sources');
+const { hostOf, clearAllSessions, clearMulticastMemory, probeHost } = require('./sources');
+
+const PROBLEM_NAMES = ['', 'network', 'network-down', 'no-video', 'camera']; // by P.PROBLEM value
 
 class CameraManager {
   constructor(store) {
@@ -105,6 +107,35 @@ class CameraManager {
     st.lastError = why;
   }
 
+  /**
+   * One camera not answering is that camera; none answering is the network
+   * (the PC's LAN cable out, a switch down).  Resolves true when no other
+   * camera is playing and up to four other camera hosts don't answer a TCP
+   * knock either.  Shared and cached for 10 s, so a wall full of waiting
+   * streams asks once.
+   */
+  cameraNetworkDown(exceptId) {
+    const now = Date.now();
+    if (this._netCheck && now - this._netCheck.at < 10000) return this._netCheck.result;
+    for (const s of this.sessions.values()) {
+      if (s.cameraId !== exceptId && s.state === 'live' && now - s.lastVideoAt < 5000) return Promise.resolve(false);
+    }
+    const own = hostOf(this.camera(exceptId)?.sources[0]?.url);
+    const urls = new Map();
+    for (const cam of this.cameras) {
+      if (!cam.enabled || cam.id === exceptId) continue;
+      const url = cam.sources[0]?.url;
+      const host = hostOf(url);
+      if (!host || host === own || urls.has(host) || !/^(rtsps?|https?|rtmp):/i.test(url)) continue;
+      urls.set(host, url);
+      if (urls.size >= 4) break;
+    }
+    const result = urls.size === 0 ? Promise.resolve(false)
+      : Promise.all([...urls.values()].map((u) => probeHost(u, 2000))).then((r) => r.every((x) => x === 'unreachable'));
+    this._netCheck = { at: now, result };
+    return result;
+  }
+
   variantInfo(id, label) { return this.variants.get(`${id}/${label}`) || null; }
 
   updateVariant(id, label, info) {
@@ -117,10 +148,13 @@ class CameraManager {
     return this.cameras.map((cam) => {
       const st = this.status(cam.id);
       let lastError = st.lastError;
-      if (!lastError && cam.enabled) {
+      let problem = null;
+      if (cam.enabled) {
         for (const src of cam.sources) {
           const s = this.sessions.get(`${cam.id}/${src.label}`);
-          if (s && s.lastError && (s.state === 'backoff' || s.state === 'starting' || s.state === 'failed')) { lastError = s.lastError; break; }
+          if (!s || !(s.state === 'backoff' || s.state === 'starting' || s.state === 'failed')) continue;
+          if (!lastError && s.lastError) lastError = s.lastError;
+          if (!problem && s.problem) problem = { kind: PROBLEM_NAMES[s.problem.kind], text: s.problem.text, since: new Date(s.problem.since).toISOString() };
         }
       }
       return {
@@ -129,13 +163,20 @@ class CameraManager {
         group: cam.group || '',
         status: st.status,
         lastError: lastError || null,
+        // Why a watched stream has no picture: { kind: 'network' | 'network-down' |
+        // 'no-video' | 'camera', text, since (ISO) }, or null.
+        problem,
         sourceHost: hostOf(cam.sources[0]?.url),
         variants: cam.sources.map((src) => {
           const v = this.variantInfo(cam.id, src.label) || {};
+          const sess = this.sessions.get(`${cam.id}/${src.label}`);
+          const live = sess && sess.active && sess.state === 'live';
           return {
             label: src.label, type: src.type,
             videoCodec: v.videoCodec || null, width: v.width || null, height: v.height || null,
             fps: v.fps || null, audioCodec: v.audioCodec || null, transcode: !!src.transcode,
+            // How the running stream arrives: 'multicast' | 'unicast'; null when not running.
+            delivery: live ? (sess.active.multicast ? 'multicast' : 'unicast') : null,
           };
         }),
       };
@@ -164,6 +205,7 @@ class CameraManager {
     this.store.saveCameras();
     if (sourcesChanged) {
       this._teardownCamera(id, true);
+      clearMulticastMemory(`${id}/`);
       for (const k of [...this.variants.keys()]) if (k.startsWith(id + '/')) this.variants.delete(k);
       this.probeCamera(existing);
     }
@@ -230,6 +272,7 @@ class CameraManager {
     const strays = this.killStrays(true);
     const viewers = this.hub ? this.hub.closeAll(1012, 'recycle') : 0;
     clearAllSessions();
+    clearMulticastMemory(); // a recycle retries multicast where it fell back
     for (const cam of this.cameras) if (cam.enabled) this.state.set(cam.id, { status: 'running', lastError: null });
     setTimeout(() => this.applyKeepWarm(), 500);
     return { cameras, processes, strays, viewers };

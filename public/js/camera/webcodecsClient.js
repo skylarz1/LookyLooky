@@ -51,6 +51,23 @@ const MSG_STREAM_RESET = 0x06;
 const MSG_STREAM_ERROR = 0x07;
 const MSG_JPEG_FRAME   = 0x08;
 const MSG_AUDIO_PCM    = 0x09;
+// STREAM_PROBLEM: kind(u8) ageSec(u32 BE) UTF-8 reason — why there is no
+// picture.  kind: 0 cleared, 1 camera unreachable, 2 camera network down,
+// 3 no video, 4 camera error.  ageSec = seconds since the picture was lost.
+// Mirrors server/protocol.js; older servers never send it.
+const MSG_STREAM_PROBLEM = 0x0a;
+const PROBLEM_KINDS = ['clear', 'network', 'network-down', 'no-video', 'camera'];
+
+/** Decode a STREAM_PROBLEM into { kind, since (ms, this clock), text }. */
+function parseProblem(view) {
+  if (view.byteLength < 7) return null;
+  const age = view.getUint32(3, false);
+  return {
+    kind:  PROBLEM_KINDS[view.getUint8(2)] || 'camera',
+    since: age ? Date.now() - age * 1000 : Date.now(),
+    text:  new TextDecoder().decode(new Uint8Array(view.buffer, view.byteOffset + 7, view.byteLength - 7)),
+  };
+}
 const FLAG_KEYFRAME    = 0x01;
 const FLAG_CATCHUP     = 0x02;
 
@@ -383,6 +400,7 @@ export class ThumbnailClient {
     ws.addEventListener('open', () => {
       this._connectedAt = performance.now();
       ws.send(JSON.stringify({ action: 'subscribeThumb', cameraId: this._cameraId }));
+      this._status('subscribed');
     });
 
     ws.addEventListener('message', (ev) => {
@@ -392,6 +410,7 @@ export class ThumbnailClient {
       if (size < 2) return;
       const view = new DataView(ev.data);
       if (view.getUint8(0) !== PROTOCOL_VERSION) return;
+      if (view.getUint8(1) === MSG_STREAM_PROBLEM) { this._onProblem(parseProblem(view)); return; }
       if (view.getUint8(1) !== MSG_JPEG_FRAME)   return;
       this._onJpeg(new Uint8Array(ev.data, 2, size - 2));
     });
@@ -411,6 +430,13 @@ export class ThumbnailClient {
       this._reconnectTimer = setTimeout(() => this._connect(),
         Math.round(this._reconnectDelayCurrent * jitter));
     });
+  }
+
+  /** The next JPEG reports 'streaming' again, which clears the pane's overlay. */
+  _onProblem(p) {
+    if (!p) return;
+    this._problem = p.kind !== 'clear';
+    this._status('problem', p);
   }
 
   /**
@@ -447,7 +473,8 @@ export class ThumbnailClient {
         }
         this._ctx.drawImage(bitmap, 0, 0);
         bitmap.close();
-        if (this._frames++ === 0) {
+        if (this._frames++ === 0 || this._problem) {
+          this._problem = false;
           this._status('streaming');
           if (!this._firstFrameSent) {
             this._firstFrameSent = true;
@@ -599,6 +626,16 @@ export class WebCodecsClient {
     // Running stats
     this._rafId        = 0;
     this._stats        = { framesRendered: 0, framesDropped: 0, audioScheduled: 0, audioDropped: 0 };
+
+    // Delay report for the server's statistics (_sendReport, every 5 s).
+    // `_clockOffsetMs` maps performance.now() onto the server's clock (the
+    // one video PTS are on), from the ping with the shortest round trip.
+    this._clockOffsetMs = null;
+    this._pings         = [];
+    this._arrivalLags   = [];
+    this._renderLags    = [];
+    this._reportTimer   = 0;
+    this._lastReport    = null;
 
     // Bytes received on the WebSocket since the last throughput sample.
     // Surfaced via getReceivedBytesPerSec().  The grid aggregates across
@@ -812,6 +849,10 @@ export class WebCodecsClient {
       const msg = { action: 'subscribe', cameraId: this._cameraId, audio: this._audioMode, audioEnabled: !this._muted };
       if (this._quality) msg.quality = this._quality;
       ws.send(JSON.stringify(msg));
+      this._lastReport = null;
+      this._sendPing();
+      clearInterval(this._reportTimer);
+      this._reportTimer = setInterval(() => { this._sendPing(); this._sendReport(); }, 5000);
     });
 
     ws.addEventListener('message', (ev) => {
@@ -835,6 +876,8 @@ export class WebCodecsClient {
 
     ws.addEventListener('close', (ev) => {
       this._ws = null;
+      clearInterval(this._reportTimer);
+      this._reportTimer = 0;
       this._resetDecoders();
       if (this._stopped) return;
 
@@ -872,7 +915,60 @@ export class WebCodecsClient {
       this._onError(new Error(msg.message || 'server error'));
       this._status('error', msg.message);
     }
+    if (msg.type === 'pong' && typeof msg.mono === 'number' && typeof msg.c === 'number') {
+      const rtt = performance.now() - msg.c;
+      this._pings.push({ rtt, offset: msg.c + rtt / 2 - msg.mono });
+      if (this._pings.length > 6) this._pings.shift();   // the last ~30 s
+      this._clockOffsetMs = this._pings.reduce((a, b) => (b.rtt < a.rtt ? b : a)).offset;
+    }
     // 'subscribed' / 'unsubscribed' / 'cameras' ack messages are informational.
+  }
+
+  _sendPing() {
+    if (this._ws?.readyState !== WebSocket.OPEN) return;
+    try { this._ws.send(JSON.stringify({ action: 'ping', c: performance.now() })); } catch { /* closing */ }
+  }
+
+  /**
+   * What this pane actually got, for the server's statistics page: frames
+   * drawn and dropped since the last report, the decoder backlog, and how
+   * long frames took from the server to arrive and to reach the screen
+   * (on the server's clock; the server subtracts its own input delay).
+   */
+  _sendReport() {
+    const ws = this._ws;
+    if (ws?.readyState !== WebSocket.OPEN) return;
+    const now = performance.now();
+    const st = this._stats;
+    const prev = this._lastReport;
+    this._lastReport = { at: now, rendered: st.framesRendered, dropped: st.framesDropped };
+    if (!prev) { this._arrivalLags = []; this._renderLags = []; return; }
+    const dt = (now - prev.at) / 1000;
+    const spread = (list) => {
+      if (!list.length) return null;
+      const s = list.sort((a, b) => a - b);
+      const at = (q) => Math.round(s[Math.min(s.length - 1, Math.floor(q * s.length))]);
+      return { p50: at(0.5), p95: at(0.95), max: Math.round(s[s.length - 1]) };
+    };
+    const report = {
+      action: 'report',
+      fps: Math.round(((st.framesRendered - prev.rendered) / dt) * 10) / 10,
+      dropped: st.framesDropped - prev.dropped,
+      decodeQueue: this._videoDecoder?.decodeQueueSize ?? 0,
+      videoQueue: this._videoQueue.length,
+      reanchors: st.reanchors || 0,
+      inputShed: st.inputShed || 0,
+      pausedDrops: st.pausedDrops || 0,
+      rebuilds: st.decoderRebuilds || 0,
+      software: !!st.softwareFallback,
+      visible: this._paneVisible && this._tabVisible,
+      rttMs: this._pings.length ? Math.round(Math.min(...this._pings.map((p) => p.rtt))) : null,
+      arrival: spread(this._arrivalLags),
+      render: spread(this._renderLags),
+    };
+    this._arrivalLags = [];
+    this._renderLags = [];
+    try { ws.send(JSON.stringify(report)); } catch { /* closing */ }
   }
 
   _handleBinary(buf) {
@@ -893,6 +989,7 @@ export class WebCodecsClient {
       case MSG_STREAM_RESET: this._handleStreamReset();     break;
       case MSG_STREAM_ERROR: this._handleStreamError(view); break;
       case MSG_AUDIO_PCM:    this._handleAudioPcm(view);    break;
+      case MSG_STREAM_PROBLEM: { const p = parseProblem(view); if (p) this._status('problem', p); break; }
       default: /* unknown type — ignore for forward compat */ break;
     }
   }
@@ -904,6 +1001,8 @@ export class WebCodecsClient {
     this._resetPlayoutClock();
     this._videoQueue.forEach(f => f.close());
     this._videoQueue = [];
+    // The server is reachable again (the pane drops a "lost connection" cover).
+    this._status('subscribed');
   }
 
   async _handleVideoConfig(view) {
@@ -964,7 +1063,7 @@ export class WebCodecsClient {
     this._status('streaming');
     const held = this._pendingChunks || [];
     this._pendingChunks = [];
-    for (const v of held) this._handleVideoChunk(v);
+    for (const v of held) this._handleVideoChunk(v, true);
   }
 
   /**
@@ -1050,7 +1149,7 @@ export class WebCodecsClient {
     }, delay);
   }
 
-  _handleVideoChunk(view) {
+  _handleVideoChunk(view, replayed = false) {
     // Layout:
     //   [2]     flags (bit0 = keyframe)
     //   [3..10] ptsMicros (Int64 LE)
@@ -1060,6 +1159,11 @@ export class WebCodecsClient {
         this._pendingChunks.push(new DataView(view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength)));
       }
       return;
+    }
+    // Arrival delay on the server's clock, for the report (_sendReport).
+    if (!replayed && this._clockOffsetMs !== null && !(view.getUint8(2) & FLAG_CATCHUP)
+        && this._arrivalLags.length < 3000) {
+      this._arrivalLags.push(performance.now() - this._clockOffsetMs - readBigInt64LE(view, 3) / 1000);
     }
     if (!this._videoDecoder || this._videoDecoder.state !== 'configured') return;
     const flags = view.getUint8(2);
@@ -1445,6 +1549,9 @@ export class WebCodecsClient {
       toRender = this._videoQueue.shift();
     }
     if (toRender) {
+      if (this._clockOffsetMs !== null && this._renderLags.length < 3000) {
+        this._renderLags.push(nowMs - this._clockOffsetMs - toRender.timestamp / 1000);
+      }
       this._renderer.drawFrame(toRender);
       this._stats.framesRendered++;
       if (!this._firstFrameSent) {
@@ -1490,6 +1597,8 @@ export class WebCodecsClient {
   }
 
   _tearDown() {
+    clearInterval(this._reportTimer);
+    this._reportTimer = 0;
     if (this._offScreenIdleTimer) {
       clearTimeout(this._offScreenIdleTimer);
       this._offScreenIdleTimer = null;

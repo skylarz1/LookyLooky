@@ -45,6 +45,25 @@ import { WebCodecsClient, ThumbnailClient, CanvasVideoRenderer, ensureSharedAudi
 
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
+/** [title, detail] for a pane's "no picture" cover (see CameraPane._showProblem). */
+function problemText(p) {
+  switch (p.kind) {
+    case 'network':      return ['Network error', 'The camera can’t be reached'];
+    case 'network-down': return ['Network error', 'No camera can be reached — check the camera network'];
+    case 'server':       return ['Network error', 'Lost the connection to LookyLooky'];
+    case 'no-video':     return ['No video from camera', p.text];
+    default:             return ['Camera error', p.text];
+  }
+}
+
+/** "2:03 AM", or "Nov 5, 2:03 AM" when it wasn't today — 12-hour, this device's time zone. */
+function formatSince(ms) {
+  const d = new Date(ms);
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true });
+  if (d.toDateString() === new Date().toDateString()) return time;
+  return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${time}`;
+}
+
 /** True when this browser can run the full-motion tier at all. */
 export function webCodecsAvailable() {
   return typeof VideoDecoder !== 'undefined' && typeof EncodedVideoChunk !== 'undefined';
@@ -306,6 +325,7 @@ export class CameraPane {
   get thumbCanvasId() { return `${this.idPrefix}tc-${this.cameraId}`; }
   get loadingId()    { return `${this.idPrefix}loading-${this.cameraId}`; }
   get statusId()     { return `${this.idPrefix}stream-status-${this.cameraId}`; }
+  get problemId()    { return `${this.idPrefix}np-${this.cameraId}`; }
   get variantTagId() { return `${this.idPrefix}vt-${this.cameraId}`; }
   get zoomBadgeId()  { return `${this.idPrefix}zb-${this.cameraId}`; }
   get qualityCtlId() { return `${this.idPrefix}qc-${this.cameraId}`; }
@@ -334,7 +354,9 @@ export class CameraPane {
     // its MJPEG process to spawn.
     const LAYER = 'position:absolute;inset:0;width:100%;height:100%;background:#000;';
     const content = cam.status !== 'running'
-      ? `<div class="placeholder">${cam.status === 'error' ? 'Stream Error' : 'Stream Stopped'}</div>`
+      ? (cam.status === 'error'
+        ? `<div class="placeholder"><div>Stream Error${cam.lastError ? `<small>${esc(cam.lastError)}</small>` : ''}</div></div>`
+        : '<div class="placeholder">Stream Stopped</div>')
       : `<div class="stream-loading" id="${this.loadingId}"></div>
          <canvas id="${this.thumbCanvasId}" style="${LAYER}display:none;"></canvas>
          <canvas id="${this.canvasId}"      style="${LAYER}display:none;"></canvas>
@@ -343,6 +365,7 @@ export class CameraPane {
                      background:rgba(0,0,0,0.6);color:#fff;padding:2px 8px;
                      max-width:calc(100% - 16px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
                      border-radius:4px;pointer-events:none;z-index:2;">Connecting…</div>
+         <div class="stream-problem" id="${this.problemId}" role="status" hidden></div>
          <button type="button" class="zoom-badge" id="${this.zoomBadgeId}" title="Reset zoom" style="display:none;"></button>
          <button type="button" class="speaker-btn" id="${this.speakerBtnId}" style="display:none;"></button>
          <div class="quality-ctl" id="${this.qualityCtlId}" style="display:none;">
@@ -584,6 +607,8 @@ export class CameraPane {
 
   _stopClients() {
     this._clearBridgeTimer();
+    clearTimeout(this._serverLostTimer); this._serverLostTimer = null;
+    this._showProblem(null);
     for (const c of [this._client, this._incoming]) {
       if (c) { try { c.stop(); } catch { /* ignore */ } }
     }
@@ -810,6 +835,29 @@ export class CameraPane {
     const spinner = document.getElementById(this.loadingId);
     const status  = document.getElementById(this.statusId);
     const card    = this.element;
+    if (state === 'problem') {
+      // Why there is no picture, from the server (STREAM_PROBLEM).
+      this._showProblem(detail);
+      if (card) card.classList.add('controls-pinned');
+      return;
+    }
+    if (state === 'subscribed') {
+      // Connected to the server again: drop the "lost connection" cover.
+      clearTimeout(this._serverLostTimer); this._serverLostTimer = null;
+      if (this._problem?.kind === 'server') this._showProblem(null);
+      return;
+    }
+    if (state === 'streaming') this._showProblem(null);
+    // The socket to the server closed (a STREAM_RESET says 'stream reset').
+    // A quick reconnect is routine; one that takes a while means this device
+    // has lost the network, and the frozen frame must not pass for live.
+    if (state === 'reconnecting' && detail !== 'stream reset' && !this._serverLostTimer) {
+      const since = Date.now();
+      this._serverLostTimer = setTimeout(() => {
+        this._serverLostTimer = null;
+        this._showProblem({ kind: 'server', since, text: '' });
+      }, 10000);
+    }
     if (state === 'streaming') {
       if (spinner) spinner.style.display = 'none';
       if (status)  { status.textContent = 'Live'; status.title = ''; setTimeout(() => { if (status) status.style.opacity = '0'; }, 1500); }
@@ -827,6 +875,29 @@ export class CameraPane {
       if (status) { status.textContent = detail ? `Error: ${detail}` : 'Error'; status.title = detail || ''; status.style.opacity = '1'; }
       if (card) card.classList.add('controls-pinned');
     }
+  }
+
+  /**
+   * Cover (and dim) the last picture with why there is none — or remove the
+   * cover (null / kind 'clear').  A dead camera must never look like a live
+   * one that happens to show a still scene.
+   */
+  _showProblem(p) {
+    const el = document.getElementById(this.problemId);
+    if (!p || p.kind === 'clear') {
+      this._problem = null;
+      if (el) el.hidden = true;
+      return;
+    }
+    clearTimeout(this._serverLostTimer); this._serverLostTimer = null;
+    this._problem = p;
+    if (!el) return;
+    const [title, detail] = problemText(p);
+    el.className = `stream-problem ${p.kind}`;
+    el.innerHTML = `<div class="sp-title">${esc(title)}</div>`
+      + (detail ? `<div class="sp-detail">${esc(detail)}</div>` : '')
+      + `<div class="sp-since">No video since ${esc(formatSince(p.since))}</div>`;
+    el.hidden = false;
   }
 
   /**
@@ -1368,6 +1439,7 @@ export class CameraGrid {
     // so a swap changes which pane wants which quality.  Cheap: resync only
     // fires where the pick actually differs from what's subscribed.
     for (const pane of this._panes.values()) pane._maybeSwitchVariant?.();
+    this.syncSoundPrompt();
   }
 
   // ── Per-pane audio ───────────────────────────────────────────────
@@ -1384,6 +1456,7 @@ export class CameraGrid {
     this._syncPaneAudio(cameraId);
     // An audible pane must be full motion (a thumbnail has no sound): re-rank pins it.
     this._rerank();
+    this.syncSoundPrompt();
   }
 
   /** Every pane speaker off (the master mute does this). */
@@ -1392,6 +1465,38 @@ export class CameraGrid {
     this._extraAudio.clear();
     for (const id of ids) this._syncPaneAudio(id);
     this._rerank();
+    this.syncSoundPrompt();
+  }
+
+  /**
+   * "Tap for sound": browsers hold audio until the page has been tapped or
+   * clicked, so a page that opens unmuted (a saved preference, or ?audio= in
+   * the URL) looks on and stays silent.  While something should be audible
+   * and the shared AudioContext is still suspended, show a button that says
+   * so; the tap on it is the gesture that unlocks audio (webcodecsClient.js).
+   */
+  syncSoundPrompt() {
+    const ctx = ensureSharedAudioContext();
+    const want = !!ctx && ((this._audio.focal && !this._audio.muted) || this._extraAudio.size > 0);
+    const show = want && ctx.state !== 'running';
+    if (ctx && !this._soundPromptBound) {
+      this._soundPromptBound = true;
+      ctx.addEventListener?.('statechange', () => this.syncSoundPrompt());
+    }
+    let el = this._soundPrompt;
+    if (!show) { if (el) el.style.display = 'none'; return; }
+    if (!el) {
+      el = this._soundPrompt = document.createElement('button');
+      el.type = 'button';
+      el.className = 'sound-prompt';
+      el.textContent = 'Tap for sound';
+      el.style.cssText = 'position:fixed;left:50%;bottom:max(16px, env(safe-area-inset-bottom));transform:translateX(-50%);'
+        + 'z-index:10000;padding:10px 18px;border-radius:999px;border:1px solid #f2711c;background:rgba(15,17,23,.92);'
+        + 'color:#fff;font:600 15px/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;cursor:pointer;';
+      el.addEventListener('click', () => { ctx.resume?.().catch(() => {}); });
+      document.body.appendChild(el);
+    }
+    el.style.display = '';
   }
 
   _syncPaneAudio(cameraId) {
@@ -1401,7 +1506,7 @@ export class CameraGrid {
     pane.setFocalStream(a.focal === cameraId, a.volume, a.muted);
   }
 
-  _syncAllAudio() { for (const id of this._panes.keys()) this._syncPaneAudio(id); }
+  _syncAllAudio() { for (const id of this._panes.keys()) this._syncPaneAudio(id); this.syncSoundPrompt(); }
 
   // ── Quality ──────────────────────────────────────────────────────
 

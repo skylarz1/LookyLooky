@@ -20,6 +20,8 @@ const P = require('./protocol');
 const SOI = Buffer.from([0xff, 0xd8]);
 const EOI = Buffer.from([0xff, 0xd9]);
 
+const problemMsg = (p) => (p ? P.streamProblem(p.kind, p.since, p.text) : P.streamProblem(P.PROBLEM.CLEAR, 0, ''));
+
 class MjpegSession {
   constructor(manager, cameraId) {
     this.manager = manager;
@@ -39,6 +41,9 @@ class MjpegSession {
       onInit: (init) => this._startDecoder(init),
       onFragment: (frag) => this._write(frag),
       onReset: () => this._stopDecoder(),
+      // Thumbnail panes get no STREAM_ERROR, only JPEGs; without this an
+      // unreachable camera just leaves them on their last frame.
+      onProblem: (p) => { for (const c of this.clients) c.send(problemMsg(p)); },
     };
   }
 
@@ -170,6 +175,7 @@ class MjpegSession {
     this.clients.add(v);
     this._ensure();
     if (this.latest && Date.now() - this.latestAt < 2000) v.sendJpeg(P.jpegFrame(this.latest));
+    else if (this.source && this.source.problem) v.send(problemMsg(this.source.problem));
   }
   removeClient(v) { this.clients.delete(v); this._maybeIdle(); }
 

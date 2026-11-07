@@ -33,9 +33,9 @@
 
 const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
-const { Fmp4Parser } = require('./fmp4');
+const { Fmp4Parser, inbandParamSets, buildHvcc, replaceHvcc, hevcCodecString } = require('./fmp4');
 const P = require('./protocol');
-const { inputArgs, friendlyError, redact, clearSession } = require('./sources');
+const { inputArgs, friendlyError, redact, clearSession, noteMulticast, MULTICAST_RETRY_MS, probeHost } = require('./sources');
 
 const SOFT_CAP = 1.5 * 1024 * 1024;
 const HARD_CAP = 8 * 1024 * 1024;
@@ -73,8 +73,10 @@ class Pipeline extends EventEmitter {
       key: `${s.cameraId}/${s.label}`,
       slowProbe: s.slowProbe,
       forceTcp: s.forceTcp,
+      multicast: Date.now() < s.noMulticastUntil ? false : undefined,
       log: (m) => s.log(m),
     });
+    this.multicast = !!input.multicast;
     const probed = s.manager.variantInfo(s.cameraId, s.label);
     const transcode = src.transcode || input.needsEncode
       || (probed && probed.videoCodec && !['h264', 'hevc'].includes(probed.videoCodec));
@@ -83,7 +85,8 @@ class Pipeline extends EventEmitter {
       ? ['-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-profile:v', 'high',
         '-pix_fmt', 'yuv420p', '-g', String(Math.round(fps * 2)), '-bf', '0']
       : ['-c:v', 'copy'];
-    if (!transcode && probed && probed.videoCodec === 'hevc') videoCodec.push('-tag:v', 'hvc1');
+    // hev1 keeps the in-band VPS/SPS/PPS that hvc1 strips; see _onVideoInit.
+    if (!transcode && probed && probed.videoCodec === 'hevc') videoCodec.push('-tag:v', s.hevcInband ? 'hev1' : 'hvc1');
 
     const wc = settings.webcodecs;
     const args = ['-hide_banner', '-nostdin', '-loglevel', 'warning', ...input.args,
@@ -95,7 +98,7 @@ class Pipeline extends EventEmitter {
       args.push('-map', input.audio, '-vn', '-sn', '-dn', '-c:a', 'pcm_mulaw', '-ar', String(PCM_RATE), '-ac', '1',
         '-f', 'mulaw', '-flush_packets', '1', 'pipe:4');
     }
-    s.log(`spawn ${redact(src.url)}${transcode ? ' (transcode h264)' : ''}${this.withAudio ? '' : ' (no audio)'}`);
+    s.log(`spawn ${redact(this.multicast ? (src.multicastUrl || src.url) : src.url)}${this.multicast ? ' (multicast)' : ''}${transcode ? ' (transcode h264)' : ''}${this.withAudio ? '' : ' (no audio)'}`);
 
     const proc = spawn(settings.ffmpeg.path || 'ffmpeg', args, {
       stdio: ['ignore', 'pipe', 'pipe', 'pipe', 'pipe'],
@@ -106,15 +109,20 @@ class Pipeline extends EventEmitter {
     const vp = new Fmp4Parser();
     vp.on('init', (init) => {
       const track = [...init.tracks.values()].find((t) => t.kind === 'video');
-      if (track) this.emit('video-init', track, init.raw);
+      if (track) this._onVideoInit(track, init.raw);
     });
     vp.on('fragment', (f) => {
       const nu = nowUs();
       let first = true;
       for (const smp of f.samples) {
         if (smp.kind !== 'video') continue;
+        let data = smp.data;
+        if (this.inbandInit) {
+          data = this._inbandSample(smp);
+          if (!data) continue;
+        }
         if (this.videoOffset === null) this.videoOffset = nu - smp.ptsUs;
-        this.emit('video-sample', smp.ptsUs + this.videoOffset, smp.isKey, smp.data, first ? f : null);
+        this.emit('video-sample', smp.ptsUs + this.videoOffset, smp.isKey, data, first ? f : null);
         first = false;
       }
     });
@@ -141,7 +149,12 @@ class Pipeline extends EventEmitter {
     }
 
     proc.stdio[2].on('data', (d) => {
-      this.stderrTail = (this.stderrTail + d.toString()).slice(-4000);
+      const text = d.toString();
+      this.stderrTail = (this.stderrTail + text).slice(-4000);
+      if (this.multicast) {
+        const gaps = (text.match(/RTP: missed \d+ packets/g) || []).length;
+        if (gaps) s._onMulticastLoss(this, gaps);
+      }
     });
     proc.on('error', (err) => { this.stderrTail += `\nspawn ${err.code || ''} ${err.message}`; });
     proc.on('close', (code, signal) => {
@@ -149,6 +162,42 @@ class Pipeline extends EventEmitter {
       s.manager.untrackProcess(proc);
       this.emit('exit', code, signal, this.stderrTail);
     });
+  }
+
+  /**
+   * An H.265 stream whose SDP has no VPS (seen on Uniview cameras) gets an
+   * hvcC no decoder accepts.  Tagged hvc1, FFmpeg also strips the VPS the
+   * camera sends in-band, so restart as hev1; as hev1, wait for the first
+   * keyframe and build the hvcC from its own VPS/SPS/PPS.
+   */
+  _onVideoInit(track, raw) {
+    if (track.codec !== 'hevc' || track.complete) { this.emit('video-init', track, raw); return; }
+    if (track.format !== 'hev1') {
+      this.session.hevcInband = true;
+      this.needsRestart = true;
+      this.session.log('H.265 without a VPS in the SDP — restarting with the in-band parameter sets kept');
+      this.kill();
+      return;
+    }
+    this.inbandInit = { track, raw };
+  }
+
+  /** A sample of an in-band-parameter-set stream, with the sets moved into the hvcC; null to drop it. */
+  _inbandSample(smp) {
+    if (!smp.isKey) return this.hevcRecord ? smp.data : null;
+    const ps = inbandParamSets(smp.data);
+    if (!ps) return this.hevcRecord ? smp.data : null;
+    let rec;
+    try { rec = buildHvcc(ps.vps, ps.sps, ps.pps); } catch (err) {
+      this.session.log(`in-band parameter sets unreadable: ${err.message}`);
+      return this.hevcRecord ? ps.rest : null;
+    }
+    if (!this.hevcRecord || !rec.equals(this.hevcRecord)) {
+      this.hevcRecord = rec;
+      const { track, raw } = this.inbandInit;
+      this.emit('video-init', { ...track, record: rec, complete: true, codecString: hevcCodecString(rec) }, replaceHvcc(raw, rec));
+    }
+    return ps.rest;
   }
 
   _onPcm(chunk) {
@@ -185,6 +234,11 @@ class StreamSession {
     this.audioAvailable = null;     // null = unknown; false once a pipeline proved there is none
     this.slowProbe = false;
     this.forceTcp = false;          // set when an RTSP/UDP source never produced a picture
+    this.noMulticastUntil = 0;      // set when multicast gave no picture or kept stalling
+    this.multicastStalls = [];      // stall times while on multicast (see _onExit)
+    this.problem = null;            // { kind, text, since }: why viewers have no picture (P.PROBLEM)
+    this.lostAt = 0;                // when the picture was lost (or the first start failed); 0 while fine
+    this._retryGen = 0;             // bumped per failure, so a stale reachability answer is dropped
 
     this.track = null;
     this.videoConfigMsg = null;
@@ -201,8 +255,10 @@ class StreamSession {
     this.idleTimer = null;
     this.lastVideoAt = 0;
     this.liveSince = 0;
-    this.stats = { bytesOut: 0, frames: 0, skips: 0, kicks: 0, restarts: 0, recycles: 0 };
-    this._bpsSample = { at: Date.now(), bytes: 0, frames: 0, bps: 0, fps: 0 };
+    this.stats = { bytesIn: 0, bytesOut: 0, frames: 0, skips: 0, kicks: 0, restarts: 0, recycles: 0, rtpGaps: 0 };
+    this.multicastLoss = [];        // times of recent RTP gaps while on multicast (_onMulticastLoss)
+    this._bpsSample = { at: Date.now(), bytes: 0, inBytes: 0, frames: 0, bps: 0, inBps: 0, fps: 0 };
+    this.ptsLagMs = null;
     this.watchdog = setInterval(() => this._watchdog(), 2000);
     this.watchdog.unref();
   }
@@ -242,6 +298,15 @@ class StreamSession {
       p.exited = true;
       this._onExit(p, 1, null, err.message);
     });
+    // FFmpeg takes up to 25 s to give up on a camera that isn't there.  A
+    // TCP knock on its port answers in at most 3, so an unplugged camera or
+    // a dead network shows as such right away.
+    probeHost(this.source.url, 3000).then((h) => {
+      if (h === 'unreachable' && p === this.active && this.state === 'starting' && !p.exited) {
+        p.stderrTail += '\nNo route to host';
+        p.kill();
+      }
+    });
   }
 
   _bind(p) {
@@ -260,6 +325,9 @@ class StreamSession {
     this.state = reason === 'failed' ? 'failed' : (reason === 'stopped' ? 'stopped' : 'idle');
     for (const p of [this.active, this.pending]) if (p) { p.removeAllListeners(); p.kill(); }
     this.active = null; this.pending = null;
+    // Nobody is watching any more: the next viewer finds out afresh (the
+    // camera may well have come back meanwhile, unseen).
+    if (reason !== 'failed') { this.problem = null; this.lostAt = 0; }
     this._resetCaches();
   }
 
@@ -295,6 +363,7 @@ class StreamSession {
     if (p !== this.active) return;
     this.active = null;
     if (this.state === 'idle' || this.state === 'stopped' || this.state === 'failed') return;
+    if (p.needsRestart) { this._spawn(); return; }  // H.265 switching to hev1 (Pipeline._onVideoInit)
 
     const why = friendlyError(tail) || (tail ? tail.trim().split('\n').pop() : null) || `FFmpeg exited (${signal || code})`;
     // No audio stream: retry immediately without the audio outputs.
@@ -304,17 +373,10 @@ class StreamSession {
       this._spawn();
       return;
     }
-    // RTSP over UDP that never produced a picture: almost always the return
-    // path being blocked (Docker's bridged network, a firewall).  Retry the
-    // same camera over TCP — every camera that does RTSP does TCP.
-    if (!this.forceTcp && this.liveSince === 0 && this.source && this.source.type === 'rtsp' && this.source.transport === 'udp') {
-      this.forceTcp = true;
-      this.log('no picture over UDP — switching this stream to TCP');
-      this._spawn();
-      return;
-    }
     // Stream parameters were not found inside the short probe window
-    // (typically a long keyframe interval): retry once with a long probe.
+    // (typically a long keyframe interval, or H.265 whose VPS only comes with
+    // the keyframe): retry once with a long probe.  Checked before multicast:
+    // packets did arrive, so multicast isn't what failed.
     if (!this.slowProbe && this.liveSince === 0
         && /dimensions not set|unspecified size|Could not find codec parameters|codec frame size is not set/i.test(tail || '')) {
       this.slowProbe = true;
@@ -322,6 +384,63 @@ class StreamSession {
       this._spawn();
       return;
     }
+    // Multicast that never produced a picture: the group isn't reaching this
+    // container (Docker Desktop, a bridged network, a router that doesn't
+    // forward it).  Fall back to unicast TCP, and let the next starts of this
+    // stream skip multicast for a while (sources.js).
+    // Only if the camera itself answers, though: when it is unplugged or the
+    // network is down every transport fails alike, and blaming multicast
+    // would keep this stream off it for an hour after the network returns.
+    if (p.multicast && this.liveSince === 0 && !/rejected the username/.test(why)) {
+      probeHost(this.source.multicastUrl || this.source.url).then((h) => {
+        // Stopped, or started again some other way, while we were checking.
+        if (this.active || this.pending || ['idle', 'stopped', 'failed'].includes(this.state)) return;
+        if (h !== 'ok') {
+          this._retryOrFail(h === 'refused' ? friendlyError('Connection refused') : 'The camera cannot be reached on the network', h);
+          return;
+        }
+        this.noMulticastUntil = Date.now() + MULTICAST_RETRY_MS;
+        noteMulticast(`${this.cameraId}/${this.label}`, false);
+        this.log('no picture over multicast — switching this stream to unicast');
+        this._spawn();
+      });
+      return;
+    }
+    // Multicast that plays, then stalls, then plays again after a rejoin is
+    // the classic sign of a switch with IGMP snooping and no IGMP querier: it
+    // prunes the group a few minutes after each join.  Twice in 15 minutes and
+    // this stream goes back to TCP.
+    if (p.multicast && this.liveSince > 0 && /stopped sending video/.test(tail || '')) {
+      const now = Date.now();
+      this.multicastStalls = this.multicastStalls.filter((t) => now - t < 15 * 60 * 1000);
+      this.multicastStalls.push(now);
+      if (this.multicastStalls.length >= 2) {
+        this.noMulticastUntil = now + MULTICAST_RETRY_MS;
+        this.multicastStalls = [];
+        noteMulticast(`${this.cameraId}/${this.label}`, false);
+        this.log('multicast keeps stalling (no IGMP querier on the network?) — switching this stream to unicast');
+      }
+    }
+    // RTSP over UDP that never produced a picture: almost always the return
+    // path being blocked (Docker's bridged network, a firewall).  Retry the
+    // same camera over TCP — every camera that does RTSP does TCP.
+    // (Not when the camera isn't there at all: that says nothing about UDP.)
+    if (!this.forceTcp && this.liveSince === 0 && this.source && this.source.type === 'rtsp' && this.source.transport === 'udp'
+        && !/cannot be reached/.test(why)) {
+      this.forceTcp = true;
+      this.log('no picture over UDP — switching this stream to TCP');
+      this._spawn();
+      return;
+    }
+    this._retryOrFail(why);
+  }
+
+  /**
+   * After a pipeline exit no special case handled: back off and retry, or
+   * give up.  `host` is what a TCP knock on the camera already said, when
+   * the caller knocked (see probeHost); otherwise it is asked here.
+   */
+  _retryOrFail(why, host) {
     this.lastError = why;
     if (/rejected the username/.test(why)) clearSession(`${this.cameraId}/${this.label}`);
     this.log(`exited: ${why}`);
@@ -329,10 +448,30 @@ class StreamSession {
     for (const c of this.clients) c.configSent = false;
     for (const r of this.rawConsumers) r.onReset?.();
     const hadPicture = this.liveSince > 0;
+    if (!this.lostAt) this.lostAt = hadPicture && this.lastVideoAt ? this.lastVideoAt : Date.now();
     this._resetCaches();
 
     if (this.consumerCount === 0 && !this.manager.keepWarm(this.cameraId, this.label)) { this.state = 'idle'; return; }
 
+    // Is the camera there at all?  A camera that doesn't answer on the
+    // network is waited for (_waitForCamera), not retried: every transport
+    // fails alike until it is back, and the viewer should be told so.
+    this.state = 'backoff';
+    const gen = ++this._retryGen;
+    const knock = host !== undefined ? Promise.resolve(host) : probeHost(this.source && this.source.url);
+    knock.then((h) => {
+      if (gen !== this._retryGen || this.state !== 'backoff' || this.active) return;
+      if (h === 'unreachable') { this._waitForCamera(gen); return; }
+      if (h === 'refused' && !/refused/.test(why)) why = this.lastError = friendlyError('Connection refused');
+      this._backoff(why, hadPicture);
+    });
+  }
+
+  _backoff(why, hadPicture) {
+    // The camera answers on the network: either it sends nothing (a stall,
+    // a timeout) or it said no (password, path, busy, a closed port).
+    const kind = /did not answer in time|stopped sending video|could not read|FFmpeg exited/.test(why)
+      ? P.PROBLEM.NO_VIDEO : P.PROBLEM.CAMERA;
     const settings = this.manager.store.settings.ffmpeg;
     const now = Date.now();
     this.restarts = this.restarts.filter((t) => now - t < (settings.restartWindowMs || 300000));
@@ -341,12 +480,13 @@ class StreamSession {
     if (this.restarts.length > (settings.maxRestarts || 10)) {
       this.log(`giving up after ${this.restarts.length - 1} restarts`);
       this._broadcast(P.streamError(why), true);
+      this._setProblem(kind, why, true);
       this.stop('failed');
       this.manager.onSessionFailed(this, why);
       return;
     }
     this._broadcast(P.streamError(why), true);
-    this.state = 'backoff';
+    this._setProblem(kind, why, true);
     // A stream that was playing gets a quick first retry; one that never
     // started backs off at the configured delay (doubling to 30 s).
     const n = this.restarts.length;
@@ -354,14 +494,69 @@ class StreamSession {
     this.restartTimer = setTimeout(() => this._spawn(), delay);
   }
 
+  /**
+   * The camera doesn't answer on the network (unplugged, powered off, or the
+   * network itself is down).  Instead of an FFmpeg every 30 s, knock on its
+   * port every few seconds and start the moment it answers.  Not counted as
+   * restarts: this never gives up while someone is watching, and recovery
+   * takes seconds, not a backoff step.
+   */
+  _waitForCamera(gen) {
+    const text = 'The camera cannot be reached on the network';
+    this.lastError = text;
+    this.log('the camera does not answer on the network — waiting for it');
+    this._broadcast(P.streamError(text), true);
+    const live = () => gen === this._retryGen && this.state === 'backoff' && !this.active;
+    let first = true;
+    const round = async () => {
+      // One camera gone, or all of them?  The answer changes the message,
+      // and can change while we wait (the other cameras drop one by one).
+      const down = await this.manager.cameraNetworkDown(this.cameraId);
+      if (!live()) return;
+      if (down) this._setProblem(P.PROBLEM.NETWORK_DOWN, 'No camera can be reached — the camera network looks down', first);
+      else this._setProblem(P.PROBLEM.NETWORK, text, first);
+      first = false;
+      this.restartTimer = setTimeout(async () => {
+        const h = await probeHost(this.source && this.source.url);
+        if (!live()) return;
+        if (h === 'unreachable') { round(); return; }
+        this.log('the camera answers again — restarting');
+        this.restarts = [];
+        this._spawn();
+      }, 5000);
+    };
+    round();
+  }
+
+  /**
+   * Tell viewers (and the thumbnail tier) why there is no picture.  Sent
+   * again after every failed start (`force`): a restart that got as far as
+   * the camera's stream header has told the clients 'streaming' meanwhile.
+   */
+  _setProblem(kind, text, force) {
+    const p = this.problem;
+    if (!force && p && p.kind === kind && p.text === text) return;
+    this.problem = { kind, text, since: this.lostAt || Date.now() };
+    this._broadcast(P.streamProblem(kind, this.problem.since, text), true);
+    for (const r of this.rawConsumers) r.onProblem?.(this.problem);
+  }
+
+  _clearProblem() {
+    this.lostAt = 0;
+    if (!this.problem) return;
+    this.problem = null;
+    this._broadcast(P.streamProblem(P.PROBLEM.CLEAR, 0, ''), true);
+    for (const r of this.rawConsumers) r.onProblem?.(null);
+  }
+
   _watchdog() {
     const p = this.active;
     if (!p || p.exited) return;
     const ff = this.manager.store.settings.ffmpeg;
     const now = Date.now();
-    const udpTry = this.source && this.source.transport === 'udp' && !this.forceTcp;
+    const udpTry = p.multicast || (this.source && this.source.transport === 'udp' && !this.forceTcp);
     if (this.state === 'starting' && now - this._startedAt > (udpTry ? 8000 : 25000)) {
-      this.log('no picture within 25 s — restarting');
+      this.log(`no picture within ${udpTry ? 8 : 25} s — restarting`);
       p.stderrTail += '\nOperation timed out';
       p.kill();
     } else if (this.state === 'live' && now - this.lastVideoAt > (ff.stallTimeoutMs || 10000)) {
@@ -376,8 +571,31 @@ class StreamSession {
     const s = this._bpsSample, dt = (now - s.at) / 1000;
     if (dt >= 2) {
       s.bps = (this.stats.bytesOut - s.bytes) / dt; s.fps = (this.stats.frames - s.frames) / dt;
-      s.at = now; s.bytes = this.stats.bytesOut; s.frames = this.stats.frames;
+      s.inBps = (this.stats.bytesIn - s.inBytes) / dt;
+      s.at = now; s.bytes = this.stats.bytesOut; s.inBytes = this.stats.bytesIn; s.frames = this.stats.frames;
     }
+  }
+
+  /**
+   * Multicast is plain UDP: a lost packet corrupts the picture until the
+   * next keyframe (green smears on H.265, which is seconds on a camera with a
+   * long keyframe interval).  Seen on the Uniview cameras, whose groups lose
+   * packets on the way while every Dahua group arrives whole.  A stream that
+   * loses packets three times in a minute moves to unicast TCP for a while,
+   * make-before-break, so viewers see no gap.
+   */
+  _onMulticastLoss(p, gaps) {
+    this.stats.rtpGaps += gaps;
+    if (p !== this.active || this.pending) return;
+    const now = Date.now();
+    this.multicastLoss = this.multicastLoss.filter((t) => now - t < 60000);
+    for (let i = 0; i < gaps; i++) this.multicastLoss.push(now);
+    if (this.multicastLoss.length < 3) return;
+    this.multicastLoss = [];
+    this.noMulticastUntil = now + MULTICAST_RETRY_MS;
+    noteMulticast(`${this.cameraId}/${this.label}`, false);
+    this.log('multicast is losing packets (3 gaps in a minute) — switching this stream to unicast');
+    this._recycle();
   }
 
   /** Make-before-break: warm a replacement, switch at its first keyframe. */
@@ -437,11 +655,18 @@ class StreamSession {
       this.state = 'live';
       this.liveSince = Date.now();
       this.lastError = null;
+      this._clearProblem();
       this.restarts = this.restarts.filter((t) => Date.now() - t < 60000);
+      if (p.multicast) noteMulticast(`${this.cameraId}/${this.label}`, true);
       this.manager.onSessionLive(this);
     }
     const msg = P.videoChunk(pts, isKey, data);
     this.stats.frames++;
+    this.stats.bytesIn += data.length;
+    // How far behind the server clock this frame's PTS is as it goes out.
+    // Viewers report delays against the same PTS; subtracting this leaves
+    // only the server -> viewer part (camera clock drift cancels out).
+    this.ptsLagMs = (nowUs() - pts) / 1000;
 
     // GOP cache for late joiners
     if (isKey) { this.gop = []; this.gopRaw = []; this.gopBytes = 0; this.gopOverflow = false; }
@@ -489,6 +714,7 @@ class StreamSession {
     if (this.state === 'failed') c.send(P.streamError(this.lastError || 'Stream failed'));
     else if (this.videoConfigMsg) c.sendConfig(this, /* catchup */ true);
     else if (this.lastError) c.send(P.streamError(this.lastError));
+    if (this.problem) c.send(P.streamProblem(this.problem.kind, this.problem.since, this.problem.text));
   }
 
   removeClient(c) {
@@ -528,7 +754,11 @@ class StreamSession {
       videoCodec: this.track?.codec || v.videoCodec || null, width: this.track?.width || null, height: this.track?.height || null,
       audio: this.audioConfigMsg ? 'opus' : (this.audioAvailable === false ? 'none' : null),
       kbps: Math.round((this._bpsSample.bps * 8) / 1000), fps: Math.round(this._bpsSample.fps * 10) / 10,
-      gopFrames: this.gop.length, lastError: this.lastError, ...this.stats,
+      inKbps: Math.round((this._bpsSample.inBps * 8) / 1000), multicast: !!this.active?.multicast,
+      ptsLagMs: this.ptsLagMs == null ? null : Math.round(this.ptsLagMs),
+      cpuPct: this.manager.metrics?.pidCpu.get(this.active?.proc?.pid) ?? null,
+      rss: this.manager.metrics?.pidRss.get(this.active?.proc?.pid) ?? null,
+      gopFrames: this.gop.length, lastError: this.lastError, problem: this.problem, ...this.stats,
     };
   }
 }

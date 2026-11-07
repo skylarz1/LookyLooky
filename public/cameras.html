@@ -200,6 +200,12 @@
       padding: 24px;
       width: 480px;
       max-width: 90vw;
+      /* Taller dialogs (Server Settings, a long multicast lookup) scroll
+         inside the dialog instead of running off a centred, fixed overlay. */
+      max-height: calc(100vh - 32px);
+      max-height: calc(100dvh - 32px);
+      overflow-y: auto;
+      overscroll-behavior: contain;
     }
     .modal h2 { font-size: 18px; margin-bottom: 16px; }
     .form-group { margin-bottom: 14px; }
@@ -318,6 +324,8 @@
     .discover-card .profile-url { font-size: 12px; color: var(--text-dim); font-family: monospace; word-break: break-all; }
     .discover-card .profile-size { font-weight: normal; font-size: 12px; color: var(--text-dim); margin-left: 6px; }
     .discover-card .discover-sub-btn { float: right; font-size: 11px; padding: 2px 9px; }
+    .discover-card .profile-mc { font-size: 11px; color: var(--accent); margin-top: 3px; }
+    .mc-hint { font-size: 11px; color: var(--text-dim); margin-top: 5px; line-height: 1.4; }
     .discover-role {
       display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 3px;
       font-size: 10px; font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase;
@@ -428,6 +436,14 @@
       line-height: 1;
     }
     .sidebar-group-label:hover .sidebar-group-edit-btn { display: flex; align-items: center; }
+    /* Groups listed after the layouts (cameras in no layout): set apart. */
+    .sidebar-group-label.unplaced {
+      font-weight: 600;
+      font-style: italic;
+      opacity: 0.8;
+      border-top: 1px dashed var(--border);
+      margin-top: 6px;
+    }
     .sidebar-group-edit-btn:hover { color: var(--text); background: rgba(255,255,255,0.1); }
     .sidebar-cam-item {
       display: flex;
@@ -648,6 +664,28 @@
         height: auto !important;
       }
       .camera-card .video-wrap { aspect-ratio: 16 / 9; flex: none; }
+
+      .layout-selector { flex: 1 1 auto; min-width: 0; }
+      .layout-selector select { min-width: 0; flex: 1 1 auto; }
+      /* Fourteen layout buttons: one row that scrolls sideways. */
+      .view-modes { width: 100%; overflow-x: auto; flex-wrap: nowrap; padding-bottom: 2px; }
+      .view-modes button { flex: 0 0 36px; height: 36px; }
+      .sidebar-wrapper { height: auto; max-height: 30vh; }
+      /* Empty slots are drag-and-drop targets, which touch screens don't do. */
+      .grid .placeholder-card { display: none; }
+    }
+    /* Phones and tablets: the header and toolbar wrap instead of widening
+       the page (unwrapped they need 1086 px, so a phone or an upright iPad
+       zoomed the whole dashboard out to fit). */
+    @media (max-width: 1100px) {
+      header { flex-wrap: wrap; gap: 6px; padding: 6px 10px; }
+      .header-actions { flex-wrap: wrap; gap: 6px; }
+      .header-actions .btn { padding: 6px 10px; }
+      .toolbar { flex-wrap: wrap; gap: 8px; padding: 8px 10px; }
+      .toolbar > div[style*="flex:1"] { display: none; }
+    }
+    @media (max-width: 480px) {
+      #throughputIndicator { display: none !important; }
     }
   </style>
 </head>
@@ -659,6 +697,10 @@
     <h1><span class="icon-wrap"><img src="/images/cameras/icon.svg" alt="" style="width:22px;height:22px;object-fit:contain;border-radius:4px;"><span class="dot" id="serverDot"></span></span> LookyLooky</h1>
     <div class="header-actions">
       <span id="cameraCount" style="color: var(--text-dim); font-size: 13px;">Loading...</span>
+      <!-- Shown while watched cameras can't be reached (see _renderNetworkAlert). -->
+      <span id="networkAlert" role="status" hidden
+            style="font-size: 12px; font-weight: 600; color: #fff; background: rgba(242,113,28,0.9);
+                   border-radius: 4px; padding: 3px 8px;"></span>
       <!-- Live client-side download rate across every active pane.  Hidden
            when no streams are running; updates on a 2 s tick. -->
       <span id="throughputIndicator" title="Total bandwidth being received across all panes"
@@ -686,6 +728,7 @@
       <button class="btn" onclick="showRecordingsModal()" title="Recordings">Recordings</button>
       <button class="btn" onclick="showScanModal()" title="Scan the network for cameras">Scan Network</button>
       <button class="btn primary" onclick="showAddModal()">+ Add Camera</button>
+      <a class="btn" href="/stats" target="_blank" rel="noopener" title="Server load, every stream and every viewer's delay" style="text-decoration:none;">Statistics</a>
       <a class="btn" href="/setup.html" target="_blank" rel="noopener" title="Certificates, browser support and viewer links" style="text-decoration:none;">Help</a>
       <button class="btn" onclick="showSettingsModal()" title="Settings" style="padding:6px 8px;">
         <!-- Gear -->
@@ -881,10 +924,18 @@
         </div>
         <div class="form-group">
           <label>Transport</label>
-          <select id="camTransport">
+          <select id="camTransport" onchange="syncMulticastRow()">
             <option value="tcp">TCP (recommended)</option>
             <option value="udp">UDP</option>
+            <option value="multicast">Multicast (falls back to TCP)</option>
           </select>
+          <div id="camMulticastHint" class="mc-hint" style="display:none;"></div>
+        </div>
+        <div class="form-group" id="camMulticastRow" style="display:none;">
+          <label>Multicast addresses <span style="font-size:11px;color:var(--text-dim);">(optional — only for cameras that use a different RTSP address for multicast; ONVIF Discover fills them in. Empty = the stream URLs above.)</span></label>
+          <input id="camMcUrl" placeholder="Main stream, multicast" style="margin-bottom:6px;" />
+          <input id="camSubMcUrl" placeholder="Substream, multicast" />
+          <div class="mc-hint">Multicast only reaches LookyLooky when its container is on the cameras' network (Linux, <code>network_mode: host</code>). On Docker Desktop it can't arrive, and the stream falls back to TCP after about 8 seconds.</div>
         </div>
         <div class="form-group">
           <label>Video <span style="font-size:11px;color:var(--text-dim);">(convert only for cameras browsers cannot decode — MJPEG/MPEG-4 cameras, or HEVC for browsers without it)</span></label>
@@ -1013,6 +1064,7 @@
             <select id="scanSharedTransport" onchange="syncSharedCreds()">
               <option value="tcp">TCP</option>
               <option value="udp">UDP</option>
+              <option value="multicast">Multicast</option>
             </select>
           </div>
           <div class="form-group" style="flex:1;min-width:150px;">
@@ -1202,6 +1254,29 @@
           A warm pipeline keeps the camera connection open with nobody watching, so a pane shows a picture the
           moment it opens. It costs one camera connection and a little network per warm stream.
         </div>
+        <div style="display:flex;gap:12px;margin:10px 0 8px;">
+          <div class="form-group" style="flex:1;margin:0;">
+            <label>RTSP multicast</label>
+            <select id="setMulticast">
+              <option value="off">Only cameras set to Multicast</option>
+              <option value="prefer">Try multicast for every RTSP camera</option>
+            </select>
+          </div>
+        </div>
+        <div style="font-size:11px;color:var(--text-dim);margin:0 0 6px;line-height:1.45;">
+          With multicast the camera sends each stream once onto the network, however many NVRs, relays and
+          LookyLooky instances watch it. It only reaches LookyLooky when the container uses host networking on
+          Linux. On Docker Desktop, or when the network doesn't forward it, each stream falls back to TCP
+          (after about 8 s the first time) and skips multicast for an hour. Recycle Cameras retries it.
+        </div>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:8px 0 6px;">
+          <button class="btn" id="mcLookupBtn" onclick="lookupMulticastAll()"
+                  title="Ask every RTSP camera over ONVIF (port 80, with the login in its stream URL) for its multicast address">Look up multicast on all cameras (ONVIF)</button>
+          <label style="font-size:12px;display:flex;align-items:center;gap:6px;margin:0;">
+            <input type="checkbox" id="mcLookupEnable" /> and switch the cameras that offer it to Multicast
+          </label>
+        </div>
+        <div id="mcLookupResult" style="font-size:12px;line-height:1.5;white-space:pre-wrap;color:var(--text-dim);"></div>
       </div>
 
       <!-- Tab: System -->
@@ -1349,10 +1424,36 @@
         // Seed a default layout locally (server returns one but handle defensively)
         layouts = [{ id: 'default', name: 'Default', gridType: '2x2', slots: {} }];
       }
+      // ?layout=<id or name> in the URL wins over the one this browser last used.
+      const want = (new URLSearchParams(location.search).get('layout') || '').trim().toLowerCase();
       const savedId = loadPrefs().activeLayoutId;
-      activeLayout = layouts.find(l => l.id === savedId) || layouts[0];
+      activeLayout = (want && layouts.find(l => l.id.toLowerCase() === want || l.name.toLowerCase() === want))
+        || layouts.find(l => l.id === savedId) || layouts[0];
       renderLayoutSelector();
       applyLayoutGridType();
+    }
+
+    /** Cameras the active layout shows, in slot order. */
+    function _layoutCameraIds() {
+      return Object.keys(activeLayout?.slots || {}).sort((a, b) => a - b)
+        .map((k) => activeLayout.slots[k]?.cameraId)
+        .filter((id) => id && cameras.some((c) => c.id === id));
+    }
+
+    /**
+     * Keep the address bar saying what this dashboard shows (layout and which
+     * camera is heard), so a copied link or a bookmark opens the same view.
+     * The same parameters work on /view and /wall.
+     */
+    function _syncUrl() {
+      const q = new URLSearchParams(location.search);
+      if (activeLayout) {
+        // The name reads better in a link; the id when two layouts share a name.
+        const unique = layouts.filter((l) => l.name.toLowerCase() === activeLayout.name.toLowerCase()).length === 1;
+        q.set('layout', unique ? activeLayout.name : activeLayout.id);
+      }
+      q.set('audio', globalMuted || globalVolume === 0 || !audioEnabledStream ? 'none' : audioEnabledStream);
+      try { history.replaceState(null, '', `${location.pathname}?${q}`); } catch { /* sandboxed frame */ }
     }
 
     function renderLayoutSelector() {
@@ -1383,6 +1484,7 @@
       renderLayoutSelector();
       _applyLayoutQuality();
       renderGrid();
+      _syncUrl();
     }
 
     async function newLayout() {
@@ -1544,12 +1646,31 @@
             : `${cameras.length} camera${cameras.length !== 1 ? 's' : ''}`;
         renderSidebar();
         renderGrid();
+        _renderNetworkAlert();
       } catch (err) {
         console.error('Failed to fetch cameras:', err);
         document.getElementById('serverDot').style.background = 'var(--red)';
       } finally {
         refreshInFlight = false;
       }
+    }
+
+    // Cameras whose streams can't reach them, as one header line: "the camera
+    // network is down" when the server says no camera answers, else a count.
+    // Only watched cameras are tried, so this covers what's on screen.
+    function _renderNetworkAlert() {
+      const el = document.getElementById('networkAlert');
+      if (!el) return;
+      const lost = cameras.filter((c) => c.problem && (c.problem.kind === 'network' || c.problem.kind === 'network-down'));
+      if (!lost.length) { el.hidden = true; return; }
+      const d = new Date(Math.min(...lost.map((c) => Date.parse(c.problem.since))));
+      let when = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true });
+      if (d.toDateString() !== new Date().toDateString()) when = `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${when}`;
+      el.textContent = lost.some((c) => c.problem.kind === 'network-down')
+        ? `Network error: no camera can be reached (since ${when})`
+        : `Network error: ${lost.length} camera${lost.length !== 1 ? 's' : ''} can’t be reached (since ${when})`;
+      el.title = lost.map((c) => c.name).join(', ');
+      el.hidden = false;
     }
 
     // ── Ad-hoc recording state ────────────────────────────────────────────────
@@ -1886,7 +2007,8 @@
 
       // Bucket cameras under their group label.  Named groups sort
       // alphabetically; ungrouped cameras trail behind under `tailLabel`.
-      const _groupSections = (camList, tailLabel) => {
+      // `prefix` marks the labels as groups when they share a list with layouts.
+      const _groupSections = (camList, tailLabel, prefix = '') => {
         if (camList.length === 0) return '';
         const buckets = new Map();
         for (const cam of camList) {
@@ -1899,7 +2021,7 @@
 
         let out = '';
         for (const key of order) {
-          out += `<div class="sidebar-group-label"><span>${key ? _scanEsc(key) : tailLabel}</span></div>`;
+          out += `<div class="sidebar-group-label${prefix ? ' unplaced' : ''}"><span>${prefix}${key ? _scanEsc(key) : tailLabel}</span></div>`;
           for (const cam of buckets.get(key)) out += _camItem(cam);
         }
         return out;
@@ -1954,11 +2076,13 @@
 
       // Cameras not slotted into any layout, still bucketed by group so a
       // venue's unplaced cameras arrive in usable clumps rather than one list.
+      // Their labels say so: a bare group name here reads as a layout that
+      // the layout picker doesn't have.
       const unassigned = cameras
         .filter(c => !assignedIds.has(c.id))
         .sort((a, b) => a.name.localeCompare(b.name));
 
-      html += _groupSections(unassigned, 'Unassigned');
+      html += _groupSections(unassigned, 'No group', 'Not in a layout · ');
 
       if (!html) html = '<div style="padding:12px;font-size:12px;color:var(--text-dim);">No cameras</div>';
       sidebar.innerHTML = modeBar + html;
@@ -2256,6 +2380,7 @@
 
       savePrefs({ audioEnabledStream: cameraId });
       _syncGlobalMuteBtn();
+      _syncUrl();
     }
 
     /** Toggle mute — independent of the volume slider position. */
@@ -2266,6 +2391,7 @@
       savePrefs({ globalMuted });
       _applyGlobalAudio();
       _syncGlobalMuteBtn();
+      _syncUrl();
     }
 
     // Server's configured budget, from /api/info.  The per-browser override
@@ -2465,6 +2591,11 @@
       document.getElementById('camSubUrl').value = '';
       document.getElementById('camTransport').value = 'tcp';
       document.getElementById('camTranscode').value = '';
+      document.getElementById('camMcUrl').value = '';
+      document.getElementById('camSubMcUrl').value = '';
+      document.getElementById('camMulticastHint').style.display = 'none';
+      _editSources = [];
+      syncMulticastRow();
 
       document.getElementById('discoverResults').innerHTML = '';
 
@@ -2508,12 +2639,16 @@
             : (full.source ? [{ label: 'main', ...full.source }] : []);
           const mainSrc = sourceList.find(s => s.label === 'main') || sourceList[0];
           const subSrc  = sourceList.find(s => s.label === 'sub');
+          _editSources = sourceList;
           if (mainSrc) {
             document.getElementById('camUrl').value = mainSrc.url || '';
             document.getElementById('camTransport').value = mainSrc.transport || 'tcp';
             document.getElementById('camTranscode').value = mainSrc.transcode ? '1' : '';
+            document.getElementById('camMcUrl').value = mainSrc.multicastUrl || '';
           }
           document.getElementById('camSubUrl').value = subSrc?.url || '';
+          document.getElementById('camSubMcUrl').value = subSrc?.multicastUrl || '';
+          syncMulticastRow();
           const urlsEl = document.getElementById('modalStreamUrls');
           urlsEl.innerHTML = buildStreamUrlsForModal(editId, full);
           urlsEl.style.display = 'block';
@@ -2565,9 +2700,20 @@
 
       // The server works the source type out from the URL (rtsp://, http://, rtmp://, test:, a file).
       const transcode = document.getElementById('camTranscode').value === '1';
+      // What the form doesn't show (HTTP login, query params, snapshot URL)
+      // is carried over from the saved source as long as its URL is unchanged.
+      const kept = (label, url) => {
+        const prev = _editSources.find(s => s.label === label);
+        if (!prev || prev.url !== url) return {};
+        const out = {};
+        for (const k of ['type', 'auth', 'params', 'snapshotUrl']) if (prev[k] !== undefined) out[k] = prev[k];
+        return out;
+      };
+      const mcUrl    = document.getElementById('camMcUrl').value.trim();
+      const subMcUrl = document.getElementById('camSubMcUrl').value.trim();
       const sources = [];
-      if (mainUrl) sources.push({ label: 'main', url: mainUrl, transport, ...(transcode ? { transcode } : {}) });
-      if (subUrl)  sources.push({ label: 'sub',  url: subUrl,  transport, ...(transcode ? { transcode } : {}) });
+      if (mainUrl) sources.push({ ...kept('main', mainUrl), label: 'main', url: mainUrl, transport, ...(transcode ? { transcode } : {}), ...(mcUrl ? { multicastUrl: mcUrl } : {}) });
+      if (subUrl)  sources.push({ ...kept('sub', subUrl), label: 'sub',  url: subUrl,  transport, ...(transcode ? { transcode } : {}), ...(subMcUrl ? { multicastUrl: subMcUrl } : {}) });
 
       const cam = {
         id: document.getElementById('camId').value.trim(),
@@ -2620,6 +2766,14 @@
         saveBtn.disabled    = false;
         saveBtn.textContent = label;
       }
+    }
+
+    // Sources of the camera being edited, as the server has them (see saveCamera).
+    let _editSources = [];
+
+    function syncMulticastRow() {
+      const on = document.getElementById('camTransport').value === 'multicast';
+      document.getElementById('camMulticastRow').style.display = on ? '' : 'none';
     }
 
     // A write whose error body matters: the camera routes answer 422 with the
@@ -2871,6 +3025,7 @@
               <select class="scan-field scan-transport" style="width:76px;" oninput="markTouched(this)" onchange="markTouched(this)">
                 <option value="tcp"${sh.transport === 'tcp' ? ' selected' : ''}>TCP</option>
                 <option value="udp"${sh.transport === 'udp' ? ' selected' : ''}>UDP</option>
+                <option value="multicast"${sh.transport === 'multicast' ? ' selected' : ''}>Multicast</option>
               </select>
             </div>
             <div style="display:flex;gap:6px;margin-bottom:6px;align-items:center;">
@@ -2990,6 +3145,7 @@
           sub.innerHTML  = '<option value="">— none —</option>' + data.streams.map(option).join('');
           main.value = data.suggested?.main || data.streams[0].rtspUrl;
           sub.value  = data.suggested?.sub || '';
+          card._streams = data.streams;
 
           form.querySelector('.scan-stream-discovered').style.display = '';
           form.querySelector('.scan-stream-manual').style.display     = 'none';
@@ -3012,7 +3168,7 @@
     // the camera reported it, so no password lands in a dropdown.
     function _streamLabel(s) {
       const size = s.width ? ` — ${s.width}×${s.height}` : '';
-      return `${s.profileName}${size} — ${s.rawUri || s.rtspUrl}`;
+      return `${s.profileName}${size}${s.multicast ? ' — multicast' : ''} — ${s.rawUri || s.rtspUrl}`;
     }
 
     // Small concurrency pool — cameras answer ONVIF slowly, but hitting 200
@@ -3091,8 +3247,9 @@
       } else if (form.querySelector('.scan-stream-discovered').style.display !== 'none') {
         const main = form.querySelector('.scan-stream-main').value;
         const sub  = form.querySelector('.scan-stream-sub').value;
-        item.sources = [{ label: 'main', url: main, transport }];
-        if (sub && sub !== main) item.sources.push({ label: 'sub', url: sub, transport });
+        const mc = (url) => (card._streams || []).find(s => s.rtspUrl === url)?.multicast?.rtspUrl || undefined;
+        item.sources = [{ label: 'main', url: main, transport, multicastUrl: mc(main) }];
+        if (sub && sub !== main) item.sources.push({ label: 'sub', url: sub, transport, multicastUrl: mc(sub) });
       }
 
       if (force) item.force = true;
@@ -3159,7 +3316,8 @@
       // the odd one out: "main 2592×1920 hevc · sub 1280×704 hevc".
       const parts = [];
       for (const r of (ev.results || [])) {
-        if (r.ok && r.width) parts.push(`${r.label} ${r.width}×${r.height} ${r.videoCodec || ''}`.trim());
+        if (r.ok && r.width) parts.push(`${r.label} ${r.width}×${r.height} ${r.videoCodec || ''}${r.multicast ? ' multicast' : ''}`.trim());
+        if (r.note) parts.push(`${r.label}: ${r.note}`);
       }
       if (ev.warning) parts.push(ev.warning);
       if (ev.note) parts.push(ev.note);
@@ -3281,6 +3439,7 @@
                 ${isMain ? '<span class="discover-role">Main</span>' : ''}${isSub ? '<span class="discover-role">Sub</span>' : ''}
               </div>
               <div class="profile-url">${_scanEsc(s.rawUri || s.rtspUrl)}</div>
+              ${s.multicast ? `<div class="profile-mc">${_multicastLabel(s.multicast)}</div>` : ''}
             </div>`;
         }).join('') +
         '<button class="btn primary" style="width:100%;margin-top:4px;" onclick="useDiscoveredStreams()">Use These Streams</button>';
@@ -3301,9 +3460,27 @@
       _renderDiscovered();
     }
 
+    // "Multicast 239.1.1.5:40000 (always on)" for a discovered stream.
+    function _multicastLabel(m) {
+      const group = m.address ? ` ${_scanEsc(m.address)}${m.port ? ':' + m.port : ''}` : '';
+      return `Multicast${group}${m.autoStart ? ' (always on)' : ''}`;
+    }
+
     function useDiscoveredStreams() {
+      const streams = window._discoveredStreams || [];
+      // The multicast address worth storing: only one that differs from the unicast URL.
+      const mcFor = (url) => {
+        const m = streams.find(s => s.rtspUrl === url)?.multicast?.rtspUrl;
+        return m && m !== url ? m : '';
+      };
       document.getElementById('camUrl').value    = _discoverPick.main || '';
       document.getElementById('camSubUrl').value = _discoverPick.sub || '';
+      document.getElementById('camMcUrl').value    = mcFor(_discoverPick.main);
+      document.getElementById('camSubMcUrl').value = _discoverPick.sub ? mcFor(_discoverPick.sub) : '';
+      const hint = document.getElementById('camMulticastHint');
+      const offers = streams.some(s => (s.rtspUrl === _discoverPick.main || s.rtspUrl === _discoverPick.sub) && s.multicast);
+      hint.textContent = offers ? 'This camera offers multicast. Choose Multicast to use it (needs host networking; see below).' : '';
+      hint.style.display = offers ? '' : 'none';
       // Not the profile name: every camera calls its first profile something
       // like "MainStream", which says nothing about which camera this is.
       if (!document.getElementById('camName').value) {
@@ -3361,6 +3538,7 @@
 
         document.getElementById('setMaxRestarts').value = s.ffmpeg?.maxRestarts || 10;
         document.getElementById('setKeepWarm').value = s.ffmpeg?.keepWarm || 'none';
+        document.getElementById('setMulticast').value = s.ffmpeg?.multicast === 'prefer' ? 'prefer' : 'off';
         document.getElementById('setIdleTimeout').value = Math.round((s.ffmpeg?.idleTimeoutMs ?? 30000) / 1000);
         document.getElementById('setStallTimeout').value = Math.round((s.ffmpeg?.stallTimeoutMs ?? 10000) / 1000);
       } catch (err) {
@@ -3433,7 +3611,56 @@
         .sort((a, b) => b[1] - a[1])
         .map(([codec, n]) => `${n} × ${codec}`)
         .join(', ') || 'none';
-      return `Codecs — Sub-streams: ${fmt(tally.sub)} · Main-streams: ${fmt(tally.main)}`;
+      // How the running streams arrive, once any run over multicast.
+      let mc = 0, uni = 0;
+      for (const cam of cams || []) for (const v of cam.variants || []) {
+        if (v.delivery === 'multicast') mc++; else if (v.delivery === 'unicast') uni++;
+      }
+      const delivery = mc ? ` · Running: ${mc} multicast, ${uni} unicast` : '';
+      return `Codecs — Sub-streams: ${fmt(tally.sub)} · Main-streams: ${fmt(tally.main)}${delivery}`;
+    }
+
+    // Settings → Multicast lookup: ONVIF on every RTSP camera already set up.
+    async function lookupMulticastAll() {
+      const btn = document.getElementById('mcLookupBtn');
+      const out = document.getElementById('mcLookupResult');
+      const enable = document.getElementById('mcLookupEnable').checked;
+      btn.disabled = true;
+      out.textContent = 'Asking the cameras… (a few seconds per camera, six at a time)';
+      try {
+        const res = await sendJSON('/api/multicast/lookup', 'POST', { enable });
+        if (!res.ok) { out.textContent = res.data.error || `Lookup failed (${res.status})`; return; }
+        // Per camera: what each stream's RTSP server answered (the group it
+        // really sends to), plus ONVIF's failure if it couldn't be asked.
+        const ready = [], sharedOut = [], refused = [], onvifFailed = [];
+        let sharedCount = 0;
+        for (const r of res.data.results) {
+          const name = r.name || r.id;
+          if (r.onvifError) onvifFailed.push(`${name}: ${r.onvifError}`);
+          const ok = r.sources.filter(x => x.rtsp && x.rtsp.ok);
+          const no = r.sources.filter(x => x.rtsp && !x.rtsp.ok);
+          const grp = x => `${x.label} ${x.rtsp.address}${x.rtsp.port ? ':' + x.rtsp.port : ''}`;
+          const clash = ok.filter(x => x.shared && x.shared.length);
+          sharedCount += clash.length;
+          if (clash.length) sharedOut.push(`${name}: ${clash.map(x => `${grp(x)} also used by ${x.shared.join(', ')}`).join('; ')}`);
+          const free = ok.filter(x => !x.shared || !x.shared.length);
+          if (free.length) ready.push(`${name} (${free.map(grp).join(', ')})${r.sources.some(x => x.changed) ? ' — saved' : ''}`);
+          if (no.length) refused.push(`${name}: ${no.map(x => `${x.label} ${x.rtsp.error}`).join('; ')}`);
+        }
+        out.textContent = [
+          `Ready for multicast (own group): ${ready.length}${ready.length ? '\n  ' + ready.join('\n  ') : ''}`,
+          `Group shared with another stream: ${sharedCount}${sharedOut.length ? ' — not switched; give each camera its own multicast address in its web page first\n  ' + sharedOut.join('\n  ') : ''}`,
+          `No multicast: ${refused.length}${refused.length ? '\n  ' + refused.join('\n  ') : ''}`,
+          `ONVIF couldn't be asked: ${onvifFailed.length}${onvifFailed.length ? '\n  ' + onvifFailed.join('\n  ') : ''}`,
+          enable ? 'Streams with a group of their own now use Multicast (falling back to TCP where it can\'t arrive).'
+                 : 'Nothing switched: choose Multicast per camera, set "Try multicast for every RTSP camera" above, or tick the box and run again.',
+        ].join('\n');
+        setTimeout(refreshCameras, 1000);
+      } catch (err) {
+        out.textContent = `Lookup failed: ${err.message}`;
+      } finally {
+        btn.disabled = false;
+      }
     }
 
     async function saveSettings() {
@@ -3450,6 +3677,7 @@
           path: document.getElementById('setFfmpegPath').value.trim() || 'ffmpeg',
           maxRestarts: parseInt(document.getElementById('setMaxRestarts').value) || 10,
           keepWarm: document.getElementById('setKeepWarm').value || 'none',
+          multicast: document.getElementById('setMulticast').value || 'off',
           idleTimeoutMs: Math.max(0, parseInt(document.getElementById('setIdleTimeout').value, 10) || 0) * 1000,
           stallTimeoutMs: Math.max(3, parseInt(document.getElementById('setStallTimeout').value, 10) || 10) * 1000,
         },
@@ -3946,9 +4174,25 @@
       // the focal pane isn't pinned in the full-motion ranking (on a large
       // layout the one camera carrying audio can be demoted to a silent
       // thumbnail), and no audio plays until the user happens to click a pane.
-      if (audioEnabledStream && cameras.some((c) => c.id === audioEnabledStream)) {
-        _doSetFocalStream(audioEnabledStream);
-      }
+      //
+      // Which camera: ?audio= in the URL wins for this load (none | first |
+      // all | <camera id>).  Otherwise the camera this browser last listened
+      // to, but only if it is in this layout: a remembered camera that isn't
+      // on screen left the mute button showing sound on with nothing playing.
+      // Failing both, the layout's first camera (still muted unless unmuted).
+      const inLayout = _layoutCameraIds();
+      const urlAudio = (new URLSearchParams(location.search).get('audio') || '').trim();
+      if (urlAudio === 'none' || urlAudio === 'off') globalMuted = true;
+      else if (urlAudio) globalMuted = false;
+      let focal = null;
+      if (urlAudio && !['none', 'off', 'first', 'all', 'on'].includes(urlAudio)) focal = urlAudio;
+      else if (['first', 'all', 'on'].includes(urlAudio)) focal = inLayout[0];
+      else if (inLayout.includes(audioEnabledStream)) focal = audioEnabledStream;
+      else focal = inLayout[0];
+      if (focal && cameras.some((c) => c.id === focal)) _doSetFocalStream(focal);
+      if (urlAudio === 'all') for (const id of inLayout) if (id !== focal) cameraGrid.setPaneAudio(id, true);
+      _syncGlobalMuteBtn();
+      _syncUrl();
 
       setInterval(refreshCameras, 5000);
 
