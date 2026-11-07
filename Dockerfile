@@ -17,7 +17,9 @@ ENV NODE_ENV=production \
     LOOKY_HTTP_PORT=8080 \
     LOOKY_HTTPS_PORT=8443
 
-RUN mkdir -p /data /seed && chown -R node:node /data
+# /tls-export: where LOOKY_TLS_EXPORT_DIR points in docker-compose.host.yml. A new
+# named volume mounted there takes this directory's owner, so node can write it.
+RUN mkdir -p /data /seed /tls-export && chown -R node:node /data /tls-export
 USER node
 VOLUME ["/data"]
 EXPOSE 8080 8443

@@ -257,6 +257,34 @@ LookyLooky copes with that by itself:
 
 `kill -HUP` on the server process re-reads cameras.json and layouts.json.
 
+### Linux host with host networking, behind the EE edge proxy
+
+This is how multicast works for real: the owner's VM on pve5 (VM 124,
+192.168.1.124 on the main LAN, 192.168.4.124 on the camera LAN, no gateway on
+the camera side). `docker-compose.host.yml` switches the container to host
+networking and exports the server certificate for the proxy. In `.env`:
+
+```
+COMPOSE_FILE=docker-compose.yml:docker-compose.host.yml:docker-compose.override.yml
+```
+
+- **Names, no port numbers:** the EE edge stack (repo
+  `EE-Services-Dashboard-and-Proxy`, `compose.https.yaml` +
+  `compose.lookylooky.yaml`) owns ports 80 and 443. Its
+  `sites/lookylooky.caddy` lists the names (`looky.local` and the bare IP),
+  sends `http://` to `https://`, and serves them with LookyLooky's own
+  certificate, so a device that trusts LookyLooky's CA trusts the proxy too.
+  Every name there must also be in `LOOKY_HOSTNAMES`. The edge stack
+  announces the `*.local` names over mDNS.
+- **Certificate:** with `LOOKY_TLS_EXPORT_DIR` set, LookyLooky copies
+  `server.crt`, `server.key` and `ca.crt` (never the CA key) there at start,
+  into the `lookylooky-tls` volume the proxy reads. The proxy reloads when
+  they change.
+- **Multicast joins on the camera LAN:** the VM routes the cameras' groups
+  (`229.0.0.0/8`) out of the camera interface in netplan. Without that route
+  the kernel joins on the default-route interface and nothing arrives.
+- Ports 8080/8443 still answer directly, for tools and as a fallback.
+
 ## Using it from another stack
 
 1. **Same compose project.** Copy the `lookylooky` service and its volume

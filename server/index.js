@@ -23,7 +23,7 @@ const { StreamHub } = require('./ws-server');
 const { Router, sendError, sendFile, checkAuth, cors } = require('./http-util');
 const api = require('./api');
 const legacy = require('./legacy-proxy');
-const { ensureCertificates } = require('./tls');
+const { ensureCertificates, exportCertificates } = require('./tls');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const HTTP_PORT = Number(process.env.LOOKY_HTTP_PORT || 8080);
@@ -171,6 +171,11 @@ if (HTTPS_ON) {
   try {
     const t = ensureCertificates(DATA_DIR);
     info.tls = { custom: t.custom, names: t.names, caUrl: t.ca ? '/ca.crt' : null };
+    if (process.env.LOOKY_TLS_EXPORT_DIR) {
+      try { exportCertificates(t, process.env.LOOKY_TLS_EXPORT_DIR); } catch (err) {
+        console.error(`[boot] could not export the certificate to ${process.env.LOOKY_TLS_EXPORT_DIR}: ${err.message}`);
+      }
+    }
     listenDual(https.createServer({ cert: t.cert, key: t.key }, handle), HTTPS_PORT);
   } catch (err) {
     console.error(`[boot] HTTPS disabled — certificate setup failed: ${err.message}`);
