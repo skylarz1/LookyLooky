@@ -352,6 +352,17 @@ class StreamSession {
       this._spawn();
       return;
     }
+    // Stream parameters were not found inside the short probe window
+    // (typically a long keyframe interval, or H.265 whose VPS only comes with
+    // the keyframe): retry once with a long probe.  Checked before multicast:
+    // packets did arrive, so multicast isn't what failed.
+    if (!this.slowProbe && this.liveSince === 0
+        && /dimensions not set|unspecified size|Could not find codec parameters|codec frame size is not set/i.test(tail || '')) {
+      this.slowProbe = true;
+      this.log('stream parameters not found in a short probe — retrying with a long one');
+      this._spawn();
+      return;
+    }
     // Multicast that never produced a picture: the group isn't reaching this
     // container (Docker Desktop, a bridged network, a router that doesn't
     // forward it).  Fall back to unicast TCP, and let the next starts of this
@@ -392,15 +403,6 @@ class StreamSession {
     if (!this.forceTcp && this.liveSince === 0 && this.source && this.source.type === 'rtsp' && this.source.transport === 'udp') {
       this.forceTcp = true;
       this.log('no picture over UDP — switching this stream to TCP');
-      this._spawn();
-      return;
-    }
-    // Stream parameters were not found inside the short probe window
-    // (typically a long keyframe interval): retry once with a long probe.
-    if (!this.slowProbe && this.liveSince === 0
-        && /dimensions not set|unspecified size|Could not find codec parameters|codec frame size is not set/i.test(tail || '')) {
-      this.slowProbe = true;
-      this.log('stream parameters not found in a short probe — retrying with a long one');
       this._spawn();
       return;
     }
