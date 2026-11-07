@@ -692,6 +692,22 @@
     grid-template-rows: auto minmax(0, 1fr);
 }
 
+/* A phone held upright (the wall's box narrower than 2:3). Rows of three
+   leave the previews thumbnail-sized and the bottom of the screen empty, so
+   the previews go two across instead: three rows for a full wall, two for a
+   room with up to three previews. Each row of two is width x 9/16 x 1/2, and
+   the wall's ratio grows by that per row, so the main pane stays 16:9. */
+.claudifer-wall { --wall-rows2: 3; }
+.claudifer-wall[data-rows="1"] { --wall-rows2: 2; }
+
+@container (max-aspect-ratio: 2 / 3) {
+    .claudifer-wall:not([data-rows="0"]) > .grid.layout-7f {
+        --wall-ratio: calc(0.5625 + 0.28125 * var(--wall-rows2));
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        grid-template-rows: auto repeat(var(--wall-rows2), minmax(0, 1fr));
+    }
+}
+
 .claudifer-wall > .grid.layout-7f .camera-card:first-child {
     grid-column: 1 / -1;
     grid-row: 1;

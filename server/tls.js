@@ -88,4 +88,22 @@ function ensureCertificates(dataDir) {
   return { cert: fs.readFileSync(crt), key: fs.readFileSync(key), ca: fs.readFileSync(caCrt), custom: false, names };
 }
 
-module.exports = { ensureCertificates, localNames };
+/**
+ * Copy the server certificate and key (never the CA key) into `dir`, for a
+ * reverse proxy that serves our names on 443 with the same certificate, so
+ * devices that trust our CA keep trusting the proxy.  Files are replaced
+ * atomically and only when they change.
+ */
+function exportCertificates(t, dir) {
+  fs.mkdirSync(dir, { recursive: true });
+  const files = { 'server.crt': t.cert, 'server.key': t.key };
+  if (t.ca) files['ca.crt'] = t.ca;
+  for (const [name, data] of Object.entries(files)) {
+    const out = path.join(dir, name);
+    try { if (fs.readFileSync(out).equals(data)) continue; } catch { /* not there yet */ }
+    fs.writeFileSync(out + '.tmp', data, { mode: name.endsWith('.key') ? 0o600 : 0o644 });
+    fs.renameSync(out + '.tmp', out);
+  }
+}
+
+module.exports = { ensureCertificates, exportCertificates, localNames };

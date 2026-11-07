@@ -208,6 +208,32 @@ Streams start on demand, and `lastError` only shows while a stream is
 retrying (someone is watching it). To check a camera, open it, or fetch
 `/stream/<id>/snapshot` (504 with a reason after 12 s if it can't connect).
 
+## Verified on the pve5 VM (2026-11-07, Ubuntu 24.04, Docker Engine, host networking)
+
+- **Multicast plays end to end**: substreams of cam-02 and cam-24 (Dahua)
+  and cam-30 (Uniview) delivered `multicast`, each FFmpeg joined its own
+  `229.1.2.x` group on the camera NIC. Needs the netplan route
+  `229.0.0.0/8` on the camera interface (default route is the main LAN).
+- The cameras now use one scheme, set on 2026-11-06: main
+  `229.1.1.<last octet>:11111`, sub `229.1.2.<last octet>:22222`.
+- **EE edge proxy in front** (`docker-compose.host.yml`, README "Linux host
+  ..."): `http://looky.local` and `http://<IP>` redirect to https;
+  `https://looky.local` and `https://<IP>` serve LookyLooky's own
+  certificate (same CA as before); WebSocket upgrade, API auth, snapshots
+  pass through; `looky.local` answers mDNS on the main LAN.
+- **cam-32 / cam-33 (Uniview, H.265)** have SPS/PPS but no VPS in their SDP;
+  they send all three in-band before each keyframe. Tagged hvc1, FFmpeg
+  writes an empty hvcC and strips the in-band sets. Fixed in code
+  (2026-11-07): such streams run as hev1 and the pipeline builds the hvcC
+  from the first keyframe (`fmp4.js`, `test/hevc.js`). All four streams then
+  played over multicast at 15 fps. Their short probe can fail ("unspecified
+  size"); the long-probe retry now runs before the multicast fallback.
+  Decoding in a real browser was not checked yet. Don't change camera codecs
+  without the owner's OK.
+- **Every camera delivers 15 fps** (measured 2026-11-07), except Lobby1 (30)
+  and cam-18 (6). The 25 fps in the dev instance is its generated test
+  pattern.
+
 ## Not verified yet (do these first on the owner's hardware)
 
 1. **Docker Desktop on Windows:** the first `docker compose up --build`

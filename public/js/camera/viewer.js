@@ -1439,6 +1439,7 @@ export class CameraGrid {
     // so a swap changes which pane wants which quality.  Cheap: resync only
     // fires where the pick actually differs from what's subscribed.
     for (const pane of this._panes.values()) pane._maybeSwitchVariant?.();
+    this.syncSoundPrompt();
   }
 
   // ── Per-pane audio ───────────────────────────────────────────────
@@ -1455,6 +1456,7 @@ export class CameraGrid {
     this._syncPaneAudio(cameraId);
     // An audible pane must be full motion (a thumbnail has no sound): re-rank pins it.
     this._rerank();
+    this.syncSoundPrompt();
   }
 
   /** Every pane speaker off (the master mute does this). */
@@ -1463,6 +1465,38 @@ export class CameraGrid {
     this._extraAudio.clear();
     for (const id of ids) this._syncPaneAudio(id);
     this._rerank();
+    this.syncSoundPrompt();
+  }
+
+  /**
+   * "Tap for sound": browsers hold audio until the page has been tapped or
+   * clicked, so a page that opens unmuted (a saved preference, or ?audio= in
+   * the URL) looks on and stays silent.  While something should be audible
+   * and the shared AudioContext is still suspended, show a button that says
+   * so; the tap on it is the gesture that unlocks audio (webcodecsClient.js).
+   */
+  syncSoundPrompt() {
+    const ctx = ensureSharedAudioContext();
+    const want = !!ctx && ((this._audio.focal && !this._audio.muted) || this._extraAudio.size > 0);
+    const show = want && ctx.state !== 'running';
+    if (ctx && !this._soundPromptBound) {
+      this._soundPromptBound = true;
+      ctx.addEventListener?.('statechange', () => this.syncSoundPrompt());
+    }
+    let el = this._soundPrompt;
+    if (!show) { if (el) el.style.display = 'none'; return; }
+    if (!el) {
+      el = this._soundPrompt = document.createElement('button');
+      el.type = 'button';
+      el.className = 'sound-prompt';
+      el.textContent = 'Tap for sound';
+      el.style.cssText = 'position:fixed;left:50%;bottom:max(16px, env(safe-area-inset-bottom));transform:translateX(-50%);'
+        + 'z-index:10000;padding:10px 18px;border-radius:999px;border:1px solid #f2711c;background:rgba(15,17,23,.92);'
+        + 'color:#fff;font:600 15px/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;cursor:pointer;';
+      el.addEventListener('click', () => { ctx.resume?.().catch(() => {}); });
+      document.body.appendChild(el);
+    }
+    el.style.display = '';
   }
 
   _syncPaneAudio(cameraId) {
@@ -1472,7 +1506,7 @@ export class CameraGrid {
     pane.setFocalStream(a.focal === cameraId, a.volume, a.muted);
   }
 
-  _syncAllAudio() { for (const id of this._panes.keys()) this._syncPaneAudio(id); }
+  _syncAllAudio() { for (const id of this._panes.keys()) this._syncPaneAudio(id); this.syncSoundPrompt(); }
 
   // ── Quality ──────────────────────────────────────────────────────
 
