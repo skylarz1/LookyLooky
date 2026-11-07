@@ -32,6 +32,10 @@ const DEFAULT_SETTINGS = {
     stallTimeoutMs: 10000,    // no video for this long => restart the pipeline
     idleTimeoutMs: 30000,     // keep a pipeline warm this long after its last viewer
     keepWarm: 'none',         // 'none' | 'sub' | 'all' — pipelines kept running with no viewers
+    // RTSP multicast (see sources.js): 'off' = only sources whose transport is
+    // 'multicast'; 'prefer' = every RTSP source tries multicast first.  Either
+    // way a stream that gets no picture over multicast falls back to TCP.
+    multicast: 'off',
   },
   webcodecs: {
     bufferMs: 150,
@@ -141,8 +145,11 @@ function normaliseSource(s, fallbackLabel) {
     label: String(s.label || fallbackLabel || 'main'),
     type: s.type && s.type !== 'auto' ? String(s.type) : sourceType(s.url),
     url: String(s.url).trim(),
-    transport: s.transport === 'udp' ? 'udp' : 'tcp',
+    transport: ['udp', 'multicast'].includes(s.transport) ? s.transport : 'tcp',
   };
+  // A separate RTSP address for multicast (ONVIF's RTP-Multicast URI), when the camera has one.
+  if (s.multicastUrl && /^rtsps?:\/\//i.test(String(s.multicastUrl).trim())) out.multicastUrl = String(s.multicastUrl).trim();
+  if (out.multicastUrl === out.url) delete out.multicastUrl;
   if (out.type !== sourceType(out.url) && !['rtsp', 'http', 'rtmp', 'test', 'file'].includes(out.type)) out.type = sourceType(out.url);
   if (s.transcode) out.transcode = true;
   if (s.params && typeof s.params === 'object') out.params = { ...s.params };
@@ -217,6 +224,7 @@ function parseCamerasXml(text) {
         maxRestarts: num('max-restarts'),
         restartDelayMs: num('restart-delay'),
         rtspTransport: a['rtsp-transport'] || undefined,
+        multicast: ['off', 'prefer'].includes(a.multicast) ? a.multicast : undefined,
         recycleAfterMs: num('recycle-after'),
         watchdogIntervalMs: num('watchdog-interval'),
       }),
@@ -251,7 +259,7 @@ function parseCamerasXml(text) {
     let s;
     while ((s = srcRe.exec(m[3] || ''))) {
       const sa = xmlAttrs(s[1]);
-      if (sa.url) sources.push({ label: sa.label || (sources.length ? 'sub' : 'main'), url: sa.url, transport: sa.transport, type: sa.type });
+      if (sa.url) sources.push({ label: sa.label || (sources.length ? 'sub' : 'main'), url: sa.url, transport: sa.transport, type: sa.type, multicastUrl: sa['multicast-url'] });
     }
     if (!sources.length && a.source) sources.push({ label: 'main', url: a.source });
     const id = slugify(a['camera-id'] || a.id || a.name);

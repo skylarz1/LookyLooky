@@ -10,6 +10,12 @@
  * service address, GetProfiles, then GetStreamUri per profile.  Authentication
  * is WS-UsernameToken digest, falling back to HTTP Digest for the cameras
  * that insist on it.
+ *
+ * Multicast: each profile's VideoEncoderConfiguration carries the camera's
+ * multicast group (address, port, TTL, AutoStart), and GetStreamUri with
+ * Stream "RTP-Multicast" gives the RTSP address to ask for it (on many
+ * cameras the same as the unicast one; the RTSP SETUP then requests
+ * multicast).  Both are reported per stream as `multicast`.
  */
 
 const http = require('http');
@@ -136,7 +142,15 @@ class OnvifClient {
     return tagAll(xml, 'Profiles').map((p) => {
       const enc = tagAll(p.body, 'VideoEncoderConfiguration')[0];
       const res = enc && tagAll(enc.body, 'Resolution')[0];
+      const mc = enc && tagAll(enc.body, 'Multicast')[0];
+      const group = mc && (tag(mc.body, 'IPv4Address') || tag(mc.body, 'IPv6Address'));
       return {
+        group: group && !/^(0\.0\.0\.0|::)$/.test(group) ? {
+          address: group,
+          port: Number(tag(mc.body, 'Port')) || null,
+          ttl: Number(tag(mc.body, 'TTL')) || null,
+          autoStart: /^true$/i.test(tag(mc.body, 'AutoStart') || ''),
+        } : null,
         token: attr(p.attrs, 'token'),
         profileName: unescape(tag(p.body, 'Name') || attr(p.attrs, 'token') || 'Profile'),
         encoding: enc ? (tag(enc.body, 'Encoding') || '').toLowerCase() : null,
@@ -146,12 +160,24 @@ class OnvifClient {
     }).filter((p) => p.token);
   }
 
-  async streamUri(token) {
+  async streamUri(token, stream = 'RTP-Unicast', protocol = 'RTSP') {
     const xml = await this.call(this.mediaUrl,
-      `<GetStreamUri xmlns="${NS_MEDIA}"><StreamSetup><Stream xmlns="${NS_SCHEMA}">RTP-Unicast</Stream>`
-      + `<Transport xmlns="${NS_SCHEMA}"><Protocol>RTSP</Protocol></Transport></StreamSetup>`
+      `<GetStreamUri xmlns="${NS_MEDIA}"><StreamSetup><Stream xmlns="${NS_SCHEMA}">${stream}</Stream>`
+      + `<Transport xmlns="${NS_SCHEMA}"><Protocol>${protocol}</Protocol></Transport></StreamSetup>`
       + `<ProfileToken>${escapeXml(token)}</ProfileToken></GetStreamUri>`);
     return unescape(tag(xml, 'Uri') || '');
+  }
+
+  /** The RTP-Multicast URI, or '' when the camera has none.  The spec's
+   *  transport for it is UDP; some cameras only accept RTSP there. */
+  async multicastUri(token) {
+    for (const protocol of ['UDP', 'RTSP']) {
+      try {
+        const uri = await this.streamUri(token, 'RTP-Multicast', protocol);
+        if (uri) return uri;
+      } catch (err) { if (err.auth) throw err; }
+    }
+    return '';
   }
 }
 
@@ -178,11 +204,17 @@ async function discover({ host, port = 80, user = '', pass = '' }) {
     await c.findMedia();
     const profiles = await c.profiles();
     const streams = [];
-    for (const p of profiles) {
+    for (const { group, ...p } of profiles) {
       try {
         const raw = await c.streamUri(p.token);
         if (!raw) continue;
-        streams.push({ ...p, rawUri: raw, rtspUrl: withCredentials(raw, host, user, pass) });
+        const mraw = await c.multicastUri(p.token);
+        const multicast = mraw || group ? {
+          rtspUrl: mraw ? withCredentials(mraw, host, user, pass) : '',
+          address: group ? group.address : null, port: group ? group.port : null,
+          ttl: group ? group.ttl : null, autoStart: group ? group.autoStart : false,
+        } : null;
+        streams.push({ ...p, rawUri: raw, rtspUrl: withCredentials(raw, host, user, pass), multicast });
       } catch (err) { if (err.auth) throw err; }
     }
     const seen = new Set();
@@ -191,7 +223,12 @@ async function discover({ host, port = 80, user = '', pass = '' }) {
     const main = byArea[0]?.rtspUrl || '';
     const smallest = byArea[byArea.length - 1];
     const sub = byArea.length > 1 && smallest.rtspUrl !== main ? smallest.rtspUrl : '';
-    return { streams: unique, suggested: { main, sub } };
+    const mcOf = (url) => (unique.find((s) => s.rtspUrl === url)?.multicast?.rtspUrl) || '';
+    return {
+      streams: unique,
+      // mainMulticast / subMulticast: the RTSP address to ask for each one as multicast ('' if none).
+      suggested: { main, sub, mainMulticast: main ? mcOf(main) : '', subMulticast: sub ? mcOf(sub) : '' },
+    };
   } catch (err) {
     if (/ECONNREFUSED/.test(err.message)) throw new Error(`Nothing is answering ONVIF on ${host}:${port}`);
     if (/EHOSTUNREACH|ENETUNREACH/.test(err.message)) throw new Error(`${host} cannot be reached`);
@@ -199,4 +236,66 @@ async function discover({ host, port = 80, user = '', pass = '' }) {
   }
 }
 
-module.exports = { discover, withCredentials };
+/** An RTSP URL reduced to what identifies a stream: host, port, path and query, no credentials. */
+function streamKey(url) {
+  try {
+    const u = new URL(String(url).replace(/^rtsps?:/i, 'http:'));
+    return `${u.hostname.toLowerCase()}:${u.port || '554'}${u.pathname}${u.search}`;
+  } catch { return String(url); }
+}
+
+/**
+ * Multicast for a camera that is already set up: ask it over ONVIF, with the
+ * credentials in its own RTSP URL, and match each of its RTSP sources to a
+ * discovered stream (same address, else main/sub as ONVIF suggests them).
+ * @returns {{sources: Array<{label, matched, multicast}>}} multicast as in discover(); throws like discover()
+ */
+async function lookupMulticast(cam, { port = 80 } = {}) {
+  const rtsp = (cam.sources || []).filter((s) => (s.type || '') === 'rtsp' || /^rtsps?:/i.test(s.url || ''));
+  if (!rtsp.length) throw new Error('No RTSP streams');
+  const u = new URL(rtsp[0].url.replace(/^rtsps?:/i, 'http:'));
+  const d = await discover({
+    host: u.hostname, port,
+    user: decodeURIComponent(u.username || ''), pass: decodeURIComponent(u.password || ''),
+  });
+  // Something answered on the port (a UniFi Protect console does) but it is
+  // not an ONVIF camera; "no multicast" would claim we asked it.
+  if (!d.streams.length) throw new Error(`ONVIF on ${u.hostname}:${port} listed no video streams (not an ONVIF camera?)`);
+  const byKey = new Map(d.streams.map((st) => [streamKey(st.rtspUrl), st]));
+  const byUrl = new Map(d.streams.map((st) => [st.rtspUrl, st]));
+  return {
+    sources: rtsp.map((src) => {
+      let st = byKey.get(streamKey(src.url));
+      let matched = st ? 'address' : null;
+      if (!st) {
+        const want = src.label === 'main' ? d.suggested.main : src.label === 'sub' ? d.suggested.sub : '';
+        st = want ? byUrl.get(want) : null;
+        if (st) matched = src.label;
+      }
+      return { label: src.label, matched, profileName: st ? st.profileName : null, multicast: st ? st.multicast : null };
+    }),
+  };
+}
+
+/**
+ * Streams that send to the same multicast group and port as another stream.
+ * Dahua cameras all ship with group 224.1.2.4 and the same ports, so two of
+ * them on multicast arrive mixed at every receiver until each camera is given
+ * its own address.
+ * @param {Array<{key, address, port}>} entries
+ * @returns {Map<string, string[]>} key -> the other keys on its group and port
+ */
+function sharedGroups(entries) {
+  const byGroup = new Map();
+  for (const e of entries) {
+    const g = `${e.address}:${e.port}`;
+    byGroup.set(g, [...(byGroup.get(g) || []), e.key]);
+  }
+  const out = new Map();
+  for (const keys of byGroup.values()) {
+    if (keys.length > 1) for (const k of keys) out.set(k, keys.filter((x) => x !== k));
+  }
+  return out;
+}
+
+module.exports = { discover, withCredentials, lookupMulticast, streamKey, sharedGroups };
