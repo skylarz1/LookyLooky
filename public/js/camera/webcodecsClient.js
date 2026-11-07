@@ -51,6 +51,23 @@ const MSG_STREAM_RESET = 0x06;
 const MSG_STREAM_ERROR = 0x07;
 const MSG_JPEG_FRAME   = 0x08;
 const MSG_AUDIO_PCM    = 0x09;
+// STREAM_PROBLEM: kind(u8) ageSec(u32 BE) UTF-8 reason — why there is no
+// picture.  kind: 0 cleared, 1 camera unreachable, 2 camera network down,
+// 3 no video, 4 camera error.  ageSec = seconds since the picture was lost.
+// Mirrors server/protocol.js; older servers never send it.
+const MSG_STREAM_PROBLEM = 0x0a;
+const PROBLEM_KINDS = ['clear', 'network', 'network-down', 'no-video', 'camera'];
+
+/** Decode a STREAM_PROBLEM into { kind, since (ms, this clock), text }. */
+function parseProblem(view) {
+  if (view.byteLength < 7) return null;
+  const age = view.getUint32(3, false);
+  return {
+    kind:  PROBLEM_KINDS[view.getUint8(2)] || 'camera',
+    since: age ? Date.now() - age * 1000 : Date.now(),
+    text:  new TextDecoder().decode(new Uint8Array(view.buffer, view.byteOffset + 7, view.byteLength - 7)),
+  };
+}
 const FLAG_KEYFRAME    = 0x01;
 const FLAG_CATCHUP     = 0x02;
 
@@ -383,6 +400,7 @@ export class ThumbnailClient {
     ws.addEventListener('open', () => {
       this._connectedAt = performance.now();
       ws.send(JSON.stringify({ action: 'subscribeThumb', cameraId: this._cameraId }));
+      this._status('subscribed');
     });
 
     ws.addEventListener('message', (ev) => {
@@ -392,6 +410,7 @@ export class ThumbnailClient {
       if (size < 2) return;
       const view = new DataView(ev.data);
       if (view.getUint8(0) !== PROTOCOL_VERSION) return;
+      if (view.getUint8(1) === MSG_STREAM_PROBLEM) { this._onProblem(parseProblem(view)); return; }
       if (view.getUint8(1) !== MSG_JPEG_FRAME)   return;
       this._onJpeg(new Uint8Array(ev.data, 2, size - 2));
     });
@@ -411,6 +430,13 @@ export class ThumbnailClient {
       this._reconnectTimer = setTimeout(() => this._connect(),
         Math.round(this._reconnectDelayCurrent * jitter));
     });
+  }
+
+  /** The next JPEG reports 'streaming' again, which clears the pane's overlay. */
+  _onProblem(p) {
+    if (!p) return;
+    this._problem = p.kind !== 'clear';
+    this._status('problem', p);
   }
 
   /**
@@ -447,7 +473,8 @@ export class ThumbnailClient {
         }
         this._ctx.drawImage(bitmap, 0, 0);
         bitmap.close();
-        if (this._frames++ === 0) {
+        if (this._frames++ === 0 || this._problem) {
+          this._problem = false;
           this._status('streaming');
           if (!this._firstFrameSent) {
             this._firstFrameSent = true;
@@ -893,6 +920,7 @@ export class WebCodecsClient {
       case MSG_STREAM_RESET: this._handleStreamReset();     break;
       case MSG_STREAM_ERROR: this._handleStreamError(view); break;
       case MSG_AUDIO_PCM:    this._handleAudioPcm(view);    break;
+      case MSG_STREAM_PROBLEM: { const p = parseProblem(view); if (p) this._status('problem', p); break; }
       default: /* unknown type — ignore for forward compat */ break;
     }
   }
@@ -904,6 +932,8 @@ export class WebCodecsClient {
     this._resetPlayoutClock();
     this._videoQueue.forEach(f => f.close());
     this._videoQueue = [];
+    // The server is reachable again (the pane drops a "lost connection" cover).
+    this._status('subscribed');
   }
 
   async _handleVideoConfig(view) {

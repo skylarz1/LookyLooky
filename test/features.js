@@ -209,6 +209,72 @@ async function measureTones(p) {
     check('wall: no page errors', errors.length === 0, errors.join(' | '));
     await ctx.close();
   }
+  // ── 9. Network errors: a pane with no picture says why instead of looking stalled ──
+  // 192.0.2.1 is TEST-NET (never answers); 127.0.0.1:1 is a live host with nothing on the port.
+  await api('POST', '/api/cameras', { id: 'lost', name: 'Lost', group: 'Feature test', force: true, sources: [{ label: 'main', url: 'rtsp://192.0.2.1:554/stream' }] });
+  await api('POST', '/api/cameras', { id: 'shut', name: 'Shut', group: 'Feature test', force: true, sources: [{ label: 'main', url: 'rtsp://127.0.0.1:1/stream' }] });
+  await api('POST', '/api/layouts', { id: 'neterr', name: 'neterr', gridType: '2x2',
+    slots: { 0: { cameraId: 'tone0' }, 1: { cameraId: 'lost' }, 2: { cameraId: 'shut' } } });
+  const cover = (p, id) => p.evaluate((cid) => {
+    const el = document.querySelector(`#card-${cid} .stream-problem`);
+    return el && !el.hidden ? el.innerText.replace(/\s+/g, ' ').trim() : '';
+  }, id);
+  const SINCE = /No video since \d{1,2}:\d{2}\s?[AP]M/;
+  {
+    const { p, ctx, errors } = await open('/camera-view.html?layout=neterr');
+    await p.waitForTimeout(10000);
+    const lost = await cover(p, 'lost'), shut = await cover(p, 'shut'), tone = await cover(p, 'tone0');
+    check('network: unreachable camera → "Network error / can’t be reached / since h:mm AM"',
+      /^Network error/.test(lost) && /can.t be reached/.test(lost) && SINCE.test(lost), lost || 'no cover');
+    check('network: closed port → "Camera error" with the reason', /^Camera error/.test(shut) && /refused/.test(shut), shut || 'no cover');
+    check('network: a live pane has no cover', tone === '', tone);
+    const cams = (await api('GET', '/api/cameras')).cameras || [];
+    const kind = (id) => cams.find((c) => c.id === id)?.problem?.kind;
+    check('network: /api/cameras reports the problem kind', kind('lost') === 'network' && kind('shut') === 'camera' && !kind('tone0'),
+      JSON.stringify(cams.filter((c) => ['lost', 'shut'].includes(c.id)).map((c) => c.problem)));
+    // Kinds the dev instance can't produce for real: the whole camera network
+    // down (other cameras play here), and this device losing the server.
+    const down = await p.evaluate(() => {
+      const pane = window.__claudiferGrid.getPane('tone0');
+      pane._onStatus('problem', { kind: 'network-down', since: Date.now() - 3 * 3600e3, text: '' });
+      const t = document.querySelector('#card-tone0 .stream-problem').innerText;
+      pane._onStatus('streaming');
+      return { t, hidden: document.querySelector('#card-tone0 .stream-problem').hidden };
+    });
+    check('network: "camera network down" cover, cleared by the next picture',
+      /No camera can be reached/.test(down.t) && /No video since /.test(down.t) && down.hidden, JSON.stringify(down));
+    await p.evaluate(() => window.__claudiferGrid.getPane('tone0')._onStatus('reconnecting'));
+    await p.waitForTimeout(10500);
+    const lostServer = await cover(p, 'tone0');
+    await p.evaluate(() => window.__claudiferGrid.getPane('tone0')._onStatus('subscribed'));
+    check('network: socket to the server down 10 s → "Lost the connection", gone on reconnect',
+      /Lost the connection to LookyLooky/.test(lostServer) && (await cover(p, 'tone0')) === '', lostServer);
+    check('network: no page errors', errors.length === 0, errors.join(' | '));
+
+    // The dashboard header, while the view above still watches the cameras.
+    const d = await open('/cameras.html');
+    await d.p.waitForTimeout(5000);
+    const alert = await d.p.evaluate(() => { const el = document.getElementById('networkAlert'); return el && !el.hidden ? el.textContent : ''; });
+    check('network: dashboard header says how many cameras can’t be reached', /^Network error: 1 camera can.t be reached \(since \d{1,2}:\d{2}\s?[AP]M\)$/.test(alert), alert || 'hidden');
+    await d.ctx.close();
+    await ctx.close();
+  }
+  // ── 10. The same on the wall, where the previews are JPEG thumbnails ──
+  {
+    const { p, ctx, errors } = await open('/wall.html?layout=neterr', { viewport: { width: 1024, height: 768 } });
+    await p.waitForTimeout(8000);
+    const st = await p.evaluate(() => {
+      const w = window.__claudiferWall;
+      return { main: w.selectedID, lostMode: w.grid.getPane('lost')?.effectiveMode };
+    });
+    const lost = await cover(p, 'lost');
+    check('network: wall thumbnail of an unreachable camera says so', st.lostMode === 'thumbnail' && /^Network error/.test(lost) && SINCE.test(lost),
+      `${JSON.stringify(st)} ${lost || 'no cover'}`);
+    check('network (wall): no page errors', errors.length === 0, errors.join(' | '));
+    await ctx.close();
+  }
+  await api('DELETE', '/api/layouts/neterr');
+  for (const id of ['lost', 'shut']) await api('DELETE', `/api/cameras/${id}`);
   await browser.close();
   const failed = results.filter((x) => !x).length;
   console.log(`\n${results.length - failed}/${results.length} checks passed`);
