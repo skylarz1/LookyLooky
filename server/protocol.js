@@ -17,6 +17,14 @@
  *   JPEG_FRAME    0x08  JPEG bytes            thumbnail tier
  *   AUDIO_PCM     0x09  pts(i64 LE) codec(u8: 0=mu-law) sampleRate(u32 BE) channels(u8) samples
  *                       for browsers with no AudioDecoder (Safari < 26, e.g. iPad 6th gen)
+ *   STREAM_PROBLEM 0x0A kind(u8) ageSec(u32 BE) UTF-8 reason
+ *                       why there is no picture, for the pane's overlay.  kind: 0 = cleared
+ *                       (video is back), 1 = the camera can't be reached on the network,
+ *                       2 = no camera can be reached (the camera network looks down),
+ *                       3 = the camera answers but sends no video, 4 = the camera answered
+ *                       with an error (password, path, busy...).  ageSec = how long ago the
+ *                       picture was lost, so the client's own clock places it ("since 2:03 AM").
+ *                       Sent after STREAM_ERROR; clients that predate it ignore it.
  *
  * VIDEO_CHUNK flags: bit0 keyframe, bit1 catch-up (replayed from the GOP cache
  * on subscribe; the client re-anchors its playout clock onto the newest one so
@@ -34,7 +42,9 @@ const MSG = {
   STREAM_ERROR: 0x07,
   JPEG_FRAME:   0x08,
   AUDIO_PCM:    0x09,
+  STREAM_PROBLEM: 0x0a,
 };
+const PROBLEM = { CLEAR: 0, NETWORK: 1, NETWORK_DOWN: 2, NO_VIDEO: 3, CAMERA: 4 };
 const FLAG_KEYFRAME = 0x01;
 const FLAG_CATCHUP  = 0x02;
 
@@ -52,6 +62,15 @@ function streamError(text) {
   const t = Buffer.from(String(text || 'stream error'), 'utf8');
   const b = header(MSG.STREAM_ERROR, t.length);
   t.copy(b, 2);
+  return b;
+}
+
+function streamProblem(kind, sinceMs, text) {
+  const t = Buffer.from(String(text || ''), 'utf8');
+  const b = header(MSG.STREAM_PROBLEM, 1 + 4 + t.length);
+  b[2] = kind;
+  b.writeUInt32BE(sinceMs ? Math.max(0, Math.min(0xffffffff, Math.round((Date.now() - sinceMs) / 1000))) : 0, 3);
+  t.copy(b, 7);
   return b;
 }
 
@@ -115,7 +134,7 @@ function jpegFrame(jpeg) {
 }
 
 module.exports = {
-  PROTOCOL_VERSION, MSG, FLAG_KEYFRAME, FLAG_CATCHUP,
-  streamStart, streamReset, streamError, videoConfig, videoChunk, asCatchup,
+  PROTOCOL_VERSION, MSG, PROBLEM, FLAG_KEYFRAME, FLAG_CATCHUP,
+  streamStart, streamReset, streamError, streamProblem, videoConfig, videoChunk, asCatchup,
   audioConfig, audioChunk, audioPcm, jpegFrame,
 };

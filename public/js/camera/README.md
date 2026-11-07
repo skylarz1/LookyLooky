@@ -83,6 +83,21 @@ browser).
 4. **The server policy:** `grid.qualityPolicy` = `'sub'` (default) |
    `'fullscreen'` | `'large'` (≥ `mainMinWidth` device pixels) | `'main'`.
 
+## No picture
+
+Both clients report `onStatus('problem', { kind, since, text })` when the
+server sends `STREAM_PROBLEM` (why there is no video: `network`,
+`network-down`, `no-video`, `camera`, or `clear`). `since` is placed on this
+device's clock from the age the server sends, so a skewed server clock
+doesn't matter. They also report `'subscribed'` once connected to the server.
+
+`CameraPane` turns that into a cover over the dimmed last frame
+(`.stream-problem`, "No video since 2:03 AM") and removes it on the next
+`'streaming'`. If the socket to the server stays closed for 10 s, the pane
+shows its own cover ("Lost the connection to LookyLooky"), and `'subscribed'`
+removes it. Thumbnail panes get `STREAM_PROBLEM` too: they receive no
+`STREAM_ERROR`.
+
 ## Hardware decode
 
 Chromium treats `hardwareAcceleration: 'prefer-hardware'` as a requirement,

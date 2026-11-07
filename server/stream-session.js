@@ -35,7 +35,7 @@ const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
 const { Fmp4Parser, inbandParamSets, buildHvcc, replaceHvcc, hevcCodecString } = require('./fmp4');
 const P = require('./protocol');
-const { inputArgs, friendlyError, redact, clearSession, noteMulticast, MULTICAST_RETRY_MS, reachable } = require('./sources');
+const { inputArgs, friendlyError, redact, clearSession, noteMulticast, MULTICAST_RETRY_MS, probeHost } = require('./sources');
 
 const SOFT_CAP = 1.5 * 1024 * 1024;
 const HARD_CAP = 8 * 1024 * 1024;
@@ -236,6 +236,9 @@ class StreamSession {
     this.forceTcp = false;          // set when an RTSP/UDP source never produced a picture
     this.noMulticastUntil = 0;      // set when multicast gave no picture or kept stalling
     this.multicastStalls = [];      // stall times while on multicast (see _onExit)
+    this.problem = null;            // { kind, text, since }: why viewers have no picture (P.PROBLEM)
+    this.lostAt = 0;                // when the picture was lost (or the first start failed); 0 while fine
+    this._retryGen = 0;             // bumped per failure, so a stale reachability answer is dropped
 
     this.track = null;
     this.videoConfigMsg = null;
@@ -295,6 +298,15 @@ class StreamSession {
       p.exited = true;
       this._onExit(p, 1, null, err.message);
     });
+    // FFmpeg takes up to 25 s to give up on a camera that isn't there.  A
+    // TCP knock on its port answers in at most 3, so an unplugged camera or
+    // a dead network shows as such right away.
+    probeHost(this.source.url, 3000).then((h) => {
+      if (h === 'unreachable' && p === this.active && this.state === 'starting' && !p.exited) {
+        p.stderrTail += '\nNo route to host';
+        p.kill();
+      }
+    });
   }
 
   _bind(p) {
@@ -313,6 +325,9 @@ class StreamSession {
     this.state = reason === 'failed' ? 'failed' : (reason === 'stopped' ? 'stopped' : 'idle');
     for (const p of [this.active, this.pending]) if (p) { p.removeAllListeners(); p.kill(); }
     this.active = null; this.pending = null;
+    // Nobody is watching any more: the next viewer finds out afresh (the
+    // camera may well have come back meanwhile, unseen).
+    if (reason !== 'failed') { this.problem = null; this.lostAt = 0; }
     this._resetCaches();
   }
 
@@ -377,10 +392,13 @@ class StreamSession {
     // network is down every transport fails alike, and blaming multicast
     // would keep this stream off it for an hour after the network returns.
     if (p.multicast && this.liveSince === 0 && !/rejected the username/.test(why)) {
-      reachable(this.source.multicastUrl || this.source.url).then((ok) => {
+      probeHost(this.source.multicastUrl || this.source.url).then((h) => {
         // Stopped, or started again some other way, while we were checking.
         if (this.active || this.pending || ['idle', 'stopped', 'failed'].includes(this.state)) return;
-        if (!ok) { this._retryOrFail('The camera cannot be reached on the network'); return; }
+        if (h !== 'ok') {
+          this._retryOrFail(h === 'refused' ? friendlyError('Connection refused') : 'The camera cannot be reached on the network', h);
+          return;
+        }
         this.noMulticastUntil = Date.now() + MULTICAST_RETRY_MS;
         noteMulticast(`${this.cameraId}/${this.label}`, false);
         this.log('no picture over multicast — switching this stream to unicast');
@@ -406,7 +424,9 @@ class StreamSession {
     // RTSP over UDP that never produced a picture: almost always the return
     // path being blocked (Docker's bridged network, a firewall).  Retry the
     // same camera over TCP — every camera that does RTSP does TCP.
-    if (!this.forceTcp && this.liveSince === 0 && this.source && this.source.type === 'rtsp' && this.source.transport === 'udp') {
+    // (Not when the camera isn't there at all: that says nothing about UDP.)
+    if (!this.forceTcp && this.liveSince === 0 && this.source && this.source.type === 'rtsp' && this.source.transport === 'udp'
+        && !/cannot be reached/.test(why)) {
       this.forceTcp = true;
       this.log('no picture over UDP — switching this stream to TCP');
       this._spawn();
@@ -415,8 +435,12 @@ class StreamSession {
     this._retryOrFail(why);
   }
 
-  /** After a pipeline exit no special case handled: back off and retry, or give up. */
-  _retryOrFail(why) {
+  /**
+   * After a pipeline exit no special case handled: back off and retry, or
+   * give up.  `host` is what a TCP knock on the camera already said, when
+   * the caller knocked (see probeHost); otherwise it is asked here.
+   */
+  _retryOrFail(why, host) {
     this.lastError = why;
     if (/rejected the username/.test(why)) clearSession(`${this.cameraId}/${this.label}`);
     this.log(`exited: ${why}`);
@@ -424,10 +448,30 @@ class StreamSession {
     for (const c of this.clients) c.configSent = false;
     for (const r of this.rawConsumers) r.onReset?.();
     const hadPicture = this.liveSince > 0;
+    if (!this.lostAt) this.lostAt = hadPicture && this.lastVideoAt ? this.lastVideoAt : Date.now();
     this._resetCaches();
 
     if (this.consumerCount === 0 && !this.manager.keepWarm(this.cameraId, this.label)) { this.state = 'idle'; return; }
 
+    // Is the camera there at all?  A camera that doesn't answer on the
+    // network is waited for (_waitForCamera), not retried: every transport
+    // fails alike until it is back, and the viewer should be told so.
+    this.state = 'backoff';
+    const gen = ++this._retryGen;
+    const knock = host !== undefined ? Promise.resolve(host) : probeHost(this.source && this.source.url);
+    knock.then((h) => {
+      if (gen !== this._retryGen || this.state !== 'backoff' || this.active) return;
+      if (h === 'unreachable') { this._waitForCamera(gen); return; }
+      if (h === 'refused' && !/refused/.test(why)) why = this.lastError = friendlyError('Connection refused');
+      this._backoff(why, hadPicture);
+    });
+  }
+
+  _backoff(why, hadPicture) {
+    // The camera answers on the network: either it sends nothing (a stall,
+    // a timeout) or it said no (password, path, busy, a closed port).
+    const kind = /did not answer in time|stopped sending video|could not read|FFmpeg exited/.test(why)
+      ? P.PROBLEM.NO_VIDEO : P.PROBLEM.CAMERA;
     const settings = this.manager.store.settings.ffmpeg;
     const now = Date.now();
     this.restarts = this.restarts.filter((t) => now - t < (settings.restartWindowMs || 300000));
@@ -436,17 +480,73 @@ class StreamSession {
     if (this.restarts.length > (settings.maxRestarts || 10)) {
       this.log(`giving up after ${this.restarts.length - 1} restarts`);
       this._broadcast(P.streamError(why), true);
+      this._setProblem(kind, why, true);
       this.stop('failed');
       this.manager.onSessionFailed(this, why);
       return;
     }
     this._broadcast(P.streamError(why), true);
-    this.state = 'backoff';
+    this._setProblem(kind, why, true);
     // A stream that was playing gets a quick first retry; one that never
     // started backs off at the configured delay (doubling to 30 s).
     const n = this.restarts.length;
     const delay = hadPicture && n === 1 ? 500 : Math.min(30000, (settings.restartDelayMs || 5000) * Math.pow(1.5, n - 1));
     this.restartTimer = setTimeout(() => this._spawn(), delay);
+  }
+
+  /**
+   * The camera doesn't answer on the network (unplugged, powered off, or the
+   * network itself is down).  Instead of an FFmpeg every 30 s, knock on its
+   * port every few seconds and start the moment it answers.  Not counted as
+   * restarts: this never gives up while someone is watching, and recovery
+   * takes seconds, not a backoff step.
+   */
+  _waitForCamera(gen) {
+    const text = 'The camera cannot be reached on the network';
+    this.lastError = text;
+    this.log('the camera does not answer on the network — waiting for it');
+    this._broadcast(P.streamError(text), true);
+    const live = () => gen === this._retryGen && this.state === 'backoff' && !this.active;
+    let first = true;
+    const round = async () => {
+      // One camera gone, or all of them?  The answer changes the message,
+      // and can change while we wait (the other cameras drop one by one).
+      const down = await this.manager.cameraNetworkDown(this.cameraId);
+      if (!live()) return;
+      if (down) this._setProblem(P.PROBLEM.NETWORK_DOWN, 'No camera can be reached — the camera network looks down', first);
+      else this._setProblem(P.PROBLEM.NETWORK, text, first);
+      first = false;
+      this.restartTimer = setTimeout(async () => {
+        const h = await probeHost(this.source && this.source.url);
+        if (!live()) return;
+        if (h === 'unreachable') { round(); return; }
+        this.log('the camera answers again — restarting');
+        this.restarts = [];
+        this._spawn();
+      }, 5000);
+    };
+    round();
+  }
+
+  /**
+   * Tell viewers (and the thumbnail tier) why there is no picture.  Sent
+   * again after every failed start (`force`): a restart that got as far as
+   * the camera's stream header has told the clients 'streaming' meanwhile.
+   */
+  _setProblem(kind, text, force) {
+    const p = this.problem;
+    if (!force && p && p.kind === kind && p.text === text) return;
+    this.problem = { kind, text, since: this.lostAt || Date.now() };
+    this._broadcast(P.streamProblem(kind, this.problem.since, text), true);
+    for (const r of this.rawConsumers) r.onProblem?.(this.problem);
+  }
+
+  _clearProblem() {
+    this.lostAt = 0;
+    if (!this.problem) return;
+    this.problem = null;
+    this._broadcast(P.streamProblem(P.PROBLEM.CLEAR, 0, ''), true);
+    for (const r of this.rawConsumers) r.onProblem?.(null);
   }
 
   _watchdog() {
@@ -555,6 +655,7 @@ class StreamSession {
       this.state = 'live';
       this.liveSince = Date.now();
       this.lastError = null;
+      this._clearProblem();
       this.restarts = this.restarts.filter((t) => Date.now() - t < 60000);
       if (p.multicast) noteMulticast(`${this.cameraId}/${this.label}`, true);
       this.manager.onSessionLive(this);
@@ -613,6 +714,7 @@ class StreamSession {
     if (this.state === 'failed') c.send(P.streamError(this.lastError || 'Stream failed'));
     else if (this.videoConfigMsg) c.sendConfig(this, /* catchup */ true);
     else if (this.lastError) c.send(P.streamError(this.lastError));
+    if (this.problem) c.send(P.streamProblem(this.problem.kind, this.problem.since, this.problem.text));
   }
 
   removeClient(c) {
@@ -656,7 +758,7 @@ class StreamSession {
       ptsLagMs: this.ptsLagMs == null ? null : Math.round(this.ptsLagMs),
       cpuPct: this.manager.metrics?.pidCpu.get(this.active?.proc?.pid) ?? null,
       rss: this.manager.metrics?.pidRss.get(this.active?.proc?.pid) ?? null,
-      gopFrames: this.gop.length, lastError: this.lastError, ...this.stats,
+      gopFrames: this.gop.length, lastError: this.lastError, problem: this.problem, ...this.stats,
     };
   }
 }

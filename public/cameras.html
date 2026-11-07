@@ -697,6 +697,10 @@
     <h1><span class="icon-wrap"><img src="/images/cameras/icon.svg" alt="" style="width:22px;height:22px;object-fit:contain;border-radius:4px;"><span class="dot" id="serverDot"></span></span> LookyLooky</h1>
     <div class="header-actions">
       <span id="cameraCount" style="color: var(--text-dim); font-size: 13px;">Loading...</span>
+      <!-- Shown while watched cameras can't be reached (see _renderNetworkAlert). -->
+      <span id="networkAlert" role="status" hidden
+            style="font-size: 12px; font-weight: 600; color: #fff; background: rgba(242,113,28,0.9);
+                   border-radius: 4px; padding: 3px 8px;"></span>
       <!-- Live client-side download rate across every active pane.  Hidden
            when no streams are running; updates on a 2 s tick. -->
       <span id="throughputIndicator" title="Total bandwidth being received across all panes"
@@ -1642,12 +1646,31 @@
             : `${cameras.length} camera${cameras.length !== 1 ? 's' : ''}`;
         renderSidebar();
         renderGrid();
+        _renderNetworkAlert();
       } catch (err) {
         console.error('Failed to fetch cameras:', err);
         document.getElementById('serverDot').style.background = 'var(--red)';
       } finally {
         refreshInFlight = false;
       }
+    }
+
+    // Cameras whose streams can't reach them, as one header line: "the camera
+    // network is down" when the server says no camera answers, else a count.
+    // Only watched cameras are tried, so this covers what's on screen.
+    function _renderNetworkAlert() {
+      const el = document.getElementById('networkAlert');
+      if (!el) return;
+      const lost = cameras.filter((c) => c.problem && (c.problem.kind === 'network' || c.problem.kind === 'network-down'));
+      if (!lost.length) { el.hidden = true; return; }
+      const d = new Date(Math.min(...lost.map((c) => Date.parse(c.problem.since))));
+      let when = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true });
+      if (d.toDateString() !== new Date().toDateString()) when = `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${when}`;
+      el.textContent = lost.some((c) => c.problem.kind === 'network-down')
+        ? `Network error: no camera can be reached (since ${when})`
+        : `Network error: ${lost.length} camera${lost.length !== 1 ? 's' : ''} can’t be reached (since ${when})`;
+      el.title = lost.map((c) => c.name).join(', ');
+      el.hidden = false;
     }
 
     // ── Ad-hoc recording state ────────────────────────────────────────────────

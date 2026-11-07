@@ -6,7 +6,7 @@
   "private": true,
   "scripts": {
     "start": "node server/index.js",
-    "test": "node test/onvif.js && node test/hevc.js && node test/e2e.js https://localhost:18443 && node test/features.js https://localhost:18443 http://localhost:18080",
+    "test": "node test/onvif.js && node test/hevc.js && node test/network.js && node test/e2e.js https://localhost:18443 && node test/features.js https://localhost:18443 http://localhost:18080",
     "dev:up": "docker compose -f docker-compose.dev.yml -p lookylooky-dev up -d --build",
     "dev:down": "docker compose -f docker-compose.dev.yml -p lookylooky-dev down -v"
   },

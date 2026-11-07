@@ -134,15 +134,27 @@ function noteMulticast(key, ok) { if (key) multicastMemory.set(key, { ok: !!ok, 
  * video arrived" — only the second says anything about multicast.
  */
 function reachable(url, timeoutMs = 2000) {
+  return probeHost(url, timeoutMs).then((r) => r === 'ok');
+}
+
+/**
+ * The same TCP connect, with the answer spelled out:
+ *   'ok'           something accepted the connection
+ *   'refused'      the host is there but nothing listens on that port
+ *   'unreachable'  no answer at all (unplugged, powered off, network down)
+ *   null           not a network URL (test pattern, file)
+ */
+function probeHost(url, timeoutMs = 2000) {
   return new Promise((resolve) => {
+    if (!/^(rtsps?|https?|rtmp):/i.test(String(url || ''))) { resolve(null); return; }
     let u;
-    try { u = new URL(String(url).replace(/^rtsps?:/i, 'http:')); } catch { resolve(false); return; }
-    const port = Number(u.port) || (/^rtsps?:/i.test(url) ? 554 : /^https:/i.test(url) ? 443 : 80);
+    try { u = new URL(String(url).replace(/^(rtsps?|rtmp):/i, 'http:')); } catch { resolve('unreachable'); return; }
+    const port = Number(u.port) || (/^rtsps?:/i.test(url) ? 554 : /^rtmp:/i.test(url) ? 1935 : /^https:/i.test(url) ? 443 : 80);
     const sock = net.connect({ host: u.hostname, port, timeout: timeoutMs });
-    const done = (ok) => { sock.destroy(); resolve(ok); };
-    sock.once('connect', () => done(true));
-    sock.once('timeout', () => done(false));
-    sock.once('error', () => done(false));
+    const done = (r) => { sock.destroy(); resolve(r); };
+    sock.once('connect', () => done('ok'));
+    sock.once('timeout', () => done('unreachable'));
+    sock.once('error', (e) => done(e.code === 'ECONNREFUSED' ? 'refused' : 'unreachable'));
   });
 }
 /** Forget what multicast did, for every stream or for one camera's ('cam-01/'). */
@@ -273,5 +285,5 @@ function friendlyError(stderr) {
 module.exports = {
   inputArgs, buildUrl, redact, hostOf, friendlyError, login, getSession, clearSession, clearAllSessions,
   httpRequest, basicHeader, wantsMulticast, multicastState, noteMulticast, clearMulticastMemory, MULTICAST_RETRY_MS,
-  reachable,
+  reachable, probeHost,
 };

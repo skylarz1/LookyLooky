@@ -146,6 +146,30 @@ variant tag turns amber). It retries High after 30 s of calm.
   already running, so a camera with few RTSP slots is not asked for another
   connection.
 
+## When a camera has no picture
+
+A pane with no video never keeps showing its last frame as if it were live.
+The frame is dimmed and covered with the reason and when the picture was lost
+("No video since 2:03 AM", in the viewer's own time). The cover goes away by
+itself with the next picture.
+
+| Cover | Meaning |
+|---|---|
+| **Network error**: the camera can't be reached | Nothing answers on the camera's port (unplugged, powered off, wrong address) |
+| **Network error**: no camera can be reached | No other camera answers either: the camera network itself is down (a cable out, a switch off) |
+| **Network error**: lost the connection to LookyLooky | This device can't reach the server (for example an iPad off Wi-Fi) |
+| **No video from camera** | The camera answers but sends nothing, or stopped sending |
+| **Camera error** | The camera answered with an error: wrong password, wrong path, RTSP switched off, too many viewers |
+
+**While a camera can't be reached, LookyLooky doesn't keep starting FFmpeg.**
+It knocks on the camera's port every 5 seconds, and the stream starts again
+within seconds of the camera answering. A camera that answers but fails keeps
+the normal backoff.
+
+The dashboard header also says when watched cameras can't be reached, and
+`GET /api/cameras` carries a `problem` for each one: `{ kind, text, since }`.
+The kinds are `network`, `network-down`, `no-video` and `camera`.
+
 ## Browser support
 
 | Browser | Video | Audio |
@@ -387,7 +411,7 @@ LOOKY_ADMIN_PASSWORD=... node tools/browserload.js --url https://looky.local --i
 | Method | Path | |
 |---|---|---|
 | GET | `/api/info`, `/api/stats`, `/api/health` | Server identity, buffer, decode budget and quality policy; live stats (`?viewers=1` adds every viewer, admin; `?history=1` the last 30 min) |
-| GET / POST | `/api/cameras` | List (no credentials); add. Each stream is tested first, and a failure returns 422 `STREAM_TEST_FAILED` with the reasons; send `force:true` to save anyway |
+| GET / POST | `/api/cameras` | List (no credentials, with each watched camera's `problem`, see above); add. Each stream is tested first, and a failure returns 422 `STREAM_TEST_FAILED` with the reasons; send `force:true` to save anyway |
 | GET / PUT / DELETE | `/api/cameras/:id` | Full definition (admin) / edit / remove |
 | POST | `/api/cameras/:id/start` `stop` `restart` | |
 | POST | `/api/cameras/batch` | Bulk add from the network scan. The response is a server-sent event stream (discover → test → add) |
