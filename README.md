@@ -47,14 +47,29 @@ browsers can be checked before any real camera is added.
 | URL | What |
 |---|---|
 | `/` | Landing page, with View and Wall links for every layout |
-| `/cameras.html` (`/dashboard`) | Dashboard: cameras, layouts, drag and drop, audio focus, fullscreen and keypad focus, recordings, network scan, ONVIF discovery, settings, recycle, import and export |
-| `/camera-view.html?layout=<id or name>[&quality=high\|low]` | Read-only board for wall displays and kiosks |
-| `/wall.html?layout=<id or name>[&camera=<id>][&quality=high\|low]` | The camera wall: one 16:9 main pane over up to six previews. Tap a preview to put it up; audio follows the main pane |
+| `/cameras.html[?layout=…&audio=…]` (`/dashboard`) | Dashboard: cameras, layouts, drag and drop, audio focus, fullscreen and keypad focus, recordings, network scan, ONVIF discovery, settings, recycle, import and export. The address bar follows the layout and the camera heard, so a copied link opens the same view |
+| `/camera-view.html?layout=<id or name>[&quality=high\|low][&audio=…]` | Read-only board for wall displays and kiosks. Silent unless `audio` is given |
+| `/wall.html?layout=<id or name>[&camera=<id>][&quality=high\|low][&audio=…]` | The camera wall: one 16:9 main pane over up to six previews (two across on an upright phone). Tap a preview to put it up; audio follows the main pane |
 | `/stats` | Statistics: server load, every stream and every viewer's delay (admin; see "Statistics and load testing") |
 | `/setup.html` | Browser capability check and certificate install steps |
 | `/camera-1.html?camera=<id>` | A single camera's raw stream drawn to a canvas (test page) |
 | `/stream/<id>/mjpeg`, `/stream/<id>/snapshot` | MJPEG and JPEG for other tools (plain HTTP works) |
 | `/cameras`, `/stream/<id>`, `/snapshot/<id>` | camera-proxy compatible endpoints |
+
+`audio` works on all three pages:
+
+- `none`: muted.
+- `first`: the layout's first camera.
+- `all`: every camera in the layout. The wall plays only its main pane.
+- a camera id: that camera.
+
+Without it, the dashboard and the wall remember the last choice in that
+browser. Browsers allow sound only after a tap or click on the page, so until
+then a **Tap for sound** button shows whenever something should be heard.
+
+On an upright phone the view board stacks its cameras at 16:9, two across
+with the large pane full width, and scrolls. The dashboard's header and
+toolbar wrap instead of widening the page.
 
 ## Zoom
 
@@ -249,7 +264,12 @@ LookyLooky copes with that by itself:
 - **Stalls twice within 15 minutes while on multicast:** it also switches to
   unicast. This is the usual symptom of a switch with IGMP snooping but no
   IGMP querier.
-- **Either way,** that stream skips multicast for an hour. Recycle Cameras
+- **Loses packets three times in a minute while on multicast:** it moves to
+  unicast make-before-break, so viewers see no gap. Multicast is UDP, and a
+  lost packet smears the picture until the next keyframe. On 2026-11-07 the
+  Uniview groups (cam-30 to cam-34) lost packets on the way to the server
+  while every Dahua group arrived whole. `/stats` counts the gaps.
+- **In every case,** that stream skips multicast for an hour. Recycle Cameras
   retries it.
 - **Recordings** use multicast only once the live stream has proven it
   works.

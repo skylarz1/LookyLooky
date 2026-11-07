@@ -149,7 +149,12 @@ class Pipeline extends EventEmitter {
     }
 
     proc.stdio[2].on('data', (d) => {
-      this.stderrTail = (this.stderrTail + d.toString()).slice(-4000);
+      const text = d.toString();
+      this.stderrTail = (this.stderrTail + text).slice(-4000);
+      if (this.multicast) {
+        const gaps = (text.match(/RTP: missed \d+ packets/g) || []).length;
+        if (gaps) s._onMulticastLoss(this, gaps);
+      }
     });
     proc.on('error', (err) => { this.stderrTail += `\nspawn ${err.code || ''} ${err.message}`; });
     proc.on('close', (code, signal) => {
@@ -247,7 +252,8 @@ class StreamSession {
     this.idleTimer = null;
     this.lastVideoAt = 0;
     this.liveSince = 0;
-    this.stats = { bytesIn: 0, bytesOut: 0, frames: 0, skips: 0, kicks: 0, restarts: 0, recycles: 0 };
+    this.stats = { bytesIn: 0, bytesOut: 0, frames: 0, skips: 0, kicks: 0, restarts: 0, recycles: 0, rtpGaps: 0 };
+    this.multicastLoss = [];        // times of recent RTP gaps while on multicast (_onMulticastLoss)
     this._bpsSample = { at: Date.now(), bytes: 0, inBytes: 0, frames: 0, bps: 0, inBps: 0, fps: 0 };
     this.ptsLagMs = null;
     this.watchdog = setInterval(() => this._watchdog(), 2000);
@@ -468,6 +474,28 @@ class StreamSession {
       s.inBps = (this.stats.bytesIn - s.inBytes) / dt;
       s.at = now; s.bytes = this.stats.bytesOut; s.inBytes = this.stats.bytesIn; s.frames = this.stats.frames;
     }
+  }
+
+  /**
+   * Multicast is plain UDP: a lost packet corrupts the picture until the
+   * next keyframe (green smears on H.265, which is seconds on a camera with a
+   * long keyframe interval).  Seen on the Uniview cameras, whose groups lose
+   * packets on the way while every Dahua group arrives whole.  A stream that
+   * loses packets three times in a minute moves to unicast TCP for a while,
+   * make-before-break, so viewers see no gap.
+   */
+  _onMulticastLoss(p, gaps) {
+    this.stats.rtpGaps += gaps;
+    if (p !== this.active || this.pending) return;
+    const now = Date.now();
+    this.multicastLoss = this.multicastLoss.filter((t) => now - t < 60000);
+    for (let i = 0; i < gaps; i++) this.multicastLoss.push(now);
+    if (this.multicastLoss.length < 3) return;
+    this.multicastLoss = [];
+    this.noMulticastUntil = now + MULTICAST_RETRY_MS;
+    noteMulticast(`${this.cameraId}/${this.label}`, false);
+    this.log('multicast is losing packets (3 gaps in a minute) — switching this stream to unicast');
+    this._recycle();
   }
 
   /** Make-before-break: warm a replacement, switch at its first keyframe. */

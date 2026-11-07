@@ -154,7 +154,7 @@
 
     function streams(s) {
       const rows = (s.sessions || []).filter((x) => x.state !== 'idle').sort((a, b) => (names[a.cameraId] || a.cameraId).localeCompare(names[b.cameraId] || b.cameraId) || a.variant.localeCompare(b.variant));
-      const head = '<tr><th class="l">Camera</th><th class="l">Stream</th><th class="l">State</th><th class="l">Via</th><th class="l">Codec</th><th>Size</th><th>In fps</th><th>In kbit/s</th><th>Viewers</th><th>Out kbit/s</th><th>FFmpeg CPU</th><th>FFmpeg RAM</th><th>Skips</th><th>Kicks</th><th>Restarts</th><th>Up</th></tr>';
+      const head = '<tr><th class="l">Camera</th><th class="l">Stream</th><th class="l">State</th><th class="l">Via</th><th class="l">Codec</th><th>Size</th><th>In fps</th><th>In kbit/s</th><th>Viewers</th><th>Out kbit/s</th><th>FFmpeg CPU</th><th>FFmpeg RAM</th><th>Skips</th><th>Kicks</th><th title="Packets lost on the way while on multicast">RTP gaps</th><th>Restarts</th><th>Up</th></tr>';
       document.getElementById('streams').innerHTML = head + rows.map((x) => `<tr>
         <td title="${esc(x.cameraId)}">${esc(names[x.cameraId] || x.cameraId)}</td><td class="l">${esc(x.variant)}</td>
         <td class="l ${x.state === 'live' ? 'ok' : x.state === 'failed' ? 'bad' : 'warn'}" title="${esc(x.lastError || '')}">${esc(x.state)}</td>
@@ -162,7 +162,7 @@
         <td class="l">${esc(x.videoCodec || '')}</td><td>${x.width ? x.width + '×' + x.height : ''}</td>
         <td>${n(x.fps, 1)}</td><td>${n(x.inKbps)}</td><td>${x.clients + (x.internalConsumers || 0)}</td><td>${n(x.kbps)}</td>
         <td class="${cls(x.cpuPct, 30, 60)}">${x.cpuPct == null ? '–' : n(x.cpuPct, 1) + ' %'}</td><td>${mb(x.rss)}</td>
-        <td class="${x.skips ? 'warn' : ''}">${x.skips}</td><td class="${x.kicks ? 'bad' : ''}">${x.kicks}</td><td>${x.restarts}</td>
+        <td class="${x.skips ? 'warn' : ''}">${x.skips}</td><td class="${x.kicks ? 'bad' : ''}">${x.kicks}</td><td class="${x.rtpGaps ? 'warn' : ''}">${x.rtpGaps || 0}</td><td>${x.restarts}</td>
         <td>${x.uptimeMs ? since(Date.now() - x.uptimeMs) : ''}</td></tr>`).join('');
     }
 
