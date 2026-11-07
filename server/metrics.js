@@ -111,9 +111,9 @@ class Metrics {
     }
     const loop = {
       // The histogram counts the timer's own resolution; take it off.
-      p50Ms: Math.max(0, Math.round(this.loop.percentile(50) / 1e4) / 100 - LOOP_RES_MS),
-      p99Ms: Math.max(0, Math.round(this.loop.percentile(99) / 1e4) / 100 - LOOP_RES_MS),
-      maxMs: Math.max(0, Math.round(this.loop.max / 1e4) / 100 - LOOP_RES_MS),
+      p50Ms: Math.max(0, Math.round(this.loop.percentile(50) / 1e4 - LOOP_RES_MS * 100) / 100),
+      p99Ms: Math.max(0, Math.round(this.loop.percentile(99) / 1e4 - LOOP_RES_MS * 100) / 100),
+      maxMs: Math.max(0, Math.round(this.loop.max / 1e4 - LOOP_RES_MS * 100) / 100),
     };
     this.loop.reset();
 

@@ -17,12 +17,13 @@
  *   --quality  low | high: pins every pane to the substream or the main stream (low)
  *   --pages    how many boards (browser contexts) to open (2)
  *   --headed   show the browsers
+ *   --channel  chrome | msedge: use the installed browser instead of Playwright's Chromium
  * Needs LOOKY_ADMIN_PASSWORD to read the viewer reports from /api/stats.
  *
- * Headless Chromium decodes in software (no GPU), and has no H.265 decoder
- * at all, so H.265 panes show as errors here though they play in a real
- * browser.  What it measures is the server and the network under real
- * playout, plus one machine's software decoding.
+ * Playwright's own Chromium has no H.265 decoder, so H.265 panes fail there
+ * though they play in a real browser; --channel chrome uses the installed
+ * Chrome and its hardware decoders.  What it measures is the server and the
+ * network under real playout, plus this one machine's decoding.
  */
 
 const fs = require('fs');
@@ -76,7 +77,7 @@ const max = (list) => { const s = list.filter((x) => x != null); return s.length
   }
   const launchArgs = ['--autoplay-policy=no-user-gesture-required'];
   if (args.ip) launchArgs.push(`--host-resolver-rules=MAP ${BASE.hostname} ${args.ip}`);
-  const browser = await chromium.launch({ headless: !args.headed, args: launchArgs });
+  const browser = await chromium.launch({ headless: !args.headed, args: launchArgs, channel: args.channel || undefined });
   const url = new URL('/camera-view.html', BASE);
   url.searchParams.set('layout', args.layout);
   url.searchParams.set('quality', QUALITY);
