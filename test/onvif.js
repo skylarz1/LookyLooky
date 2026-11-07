@@ -9,8 +9,9 @@ const http = require('http');
 const crypto = require('crypto');
 const path = require('path');
 process.env.LOOKY_DATA_DIR = process.env.LOOKY_DATA_DIR || path.join(__dirname, 'out', 'onvif-data');
-const { discover, lookupMulticast } = require('../server/onvif');
-const { inputArgs, noteMulticast, multicastState, clearMulticastMemory } = require('../server/sources');
+const { discover, lookupMulticast, sharedGroups } = require('../server/onvif');
+const { inputArgs, noteMulticast, multicastState, clearMulticastMemory, reachable } = require('../server/sources');
+const { parseMulticastReply } = require('../server/probe');
 const { normaliseCamera, parseCamerasXml, DEFAULT_SETTINGS } = require('../server/config');
 
 const results = [];
@@ -40,6 +41,9 @@ function authorised(xml) {
   return want === digest;
 }
 
+// Answers like something that speaks ONVIF but has no video (a UniFi Protect console).
+let noProfiles = false;
+
 function camera(req, body) {
   if (/GetSystemDateAndTime/.test(body)) {
     const d = new Date();
@@ -51,6 +55,7 @@ function camera(req, body) {
     return env(`<tds:GetCapabilitiesResponse><tds:Capabilities><tt:Media><tt:XAddr>http://10.9.9.9:${port}/onvif/media_service</tt:XAddr></tt:Media></tds:Capabilities></tds:GetCapabilitiesResponse>`);
   }
   if (/GetProfiles/.test(body)) {
+    if (noProfiles) return env('<trt:GetProfilesResponse></trt:GetProfilesResponse>');
     return env(`<trt:GetProfilesResponse>${PROFILES.map((p) => `<trt:Profiles token="${p.token}" fixed="true"><tt:Name>${p.name}</tt:Name>`
       + `<tt:VideoEncoderConfiguration token="v${p.token}"><tt:Name>enc</tt:Name><tt:Encoding>H264</tt:Encoding><tt:Resolution><tt:Width>${p.w}</tt:Width><tt:Height>${p.h}</tt:Height></tt:Resolution>`
       + (p.group ? `<tt:Multicast><tt:Address><tt:Type>IPv4</tt:Type><tt:IPv4Address>${p.group[0]}</tt:IPv4Address></tt:Address><tt:Port>${p.group[1]}</tt:Port><tt:TTL>64</tt:TTL><tt:AutoStart>${p.group[2]}</tt:AutoStart></tt:Multicast>` : '')
@@ -113,6 +118,49 @@ function camera(req, body) {
     let lookErr = '';
     try { await lookupMulticast(normaliseCamera({ id: 'bad', sources: [{ url: 'rtsp://admin:wrong@127.0.0.1:554/x' }] }), { port }); } catch (err) { lookErr = err.message; }
     check('lookup: wrong password is reported', /rejected the username or password/.test(lookErr), lookErr);
+    noProfiles = true;
+    lookErr = '';
+    try { await lookupMulticast(existing, { port }); } catch (err) { lookErr = err.message; }
+    noProfiles = false;
+    check('lookup: ONVIF with no video streams is an error, not "no multicast"', /listed no video streams/.test(lookErr), lookErr);
+
+    // --- the camera's own answer to a multicast SETUP (FFmpeg trace lines) --
+    const T = (s) => `[in#0 @ 0x1] line='${s}'\n`;
+    const challenge = T('RTSP/1.0 401 Unauthorized') + T('RTSP/1.0 200 OK');
+    let m = parseMulticastReply(challenge + T('Transport: RTP/AVP;multicast;destination=224.1.2.4;port=40016-40017;ttl=64;ssrc=490ADBC4'));
+    check('setup: Dahua reply → group and video port', m.ok && m.address === '224.1.2.4' && m.port === 40016, JSON.stringify(m));
+    m = parseMulticastReply(T('Transport: RTP/AVP/UDP;multicast;destination=229.1.1.171;port=11111-11112;mode="PLAY"'));
+    check('setup: parameters in another order (mode="PLAY")', m.ok && m.address === '229.1.1.171' && m.port === 11111, JSON.stringify(m));
+    m = parseMulticastReply(T('Transport: RTP/AVP/UDP;multicast;destination=;port=25357-25358;mode="PLAY"'));
+    check('setup: empty destination → no multicast address set', !m.ok && /no multicast address set/.test(m.error), m.error);
+    m = parseMulticastReply(T('Transport: RTP/AVP/UDP;multicast;destination=0.0.0.0;port=22747-22748'));
+    check('setup: 0.0.0.0 destination → no multicast address set', !m.ok && /no multicast address set/.test(m.error), m.error);
+    m = parseMulticastReply(challenge + T('RTSP/1.0 404 Not Found'));
+    check('setup: 404 after the auth challenge is a 404, not a password problem', !m.ok && /404/.test(m.error), m.error);
+    m = parseMulticastReply(T('RTSP/1.0 461 Unsupported Transport'));
+    check('setup: 461 → multicast not offered', !m.ok && /461/.test(m.error), m.error);
+    m = parseMulticastReply(T('RTSP/1.0 401 Unauthorized') + T('RTSP/1.0 401 Unauthorized') + '[rtsp @ 0x2] method DESCRIBE failed: 401 Unauthorized\n');
+    check('setup: wrong password', !m.ok && /rejected the username or password/.test(m.error), m.error);
+    m = parseMulticastReply(T('RTSP/1.0 200 OK') + '[in#0 @ 0x3] Error opening input: Invalid data found when processing input\n');
+    check('setup: connection dropped after SETUP (UniFi Protect) → not accepted', !m.ok && /did not accept the multicast request/.test(m.error), m.error);
+    m = parseMulticastReply(challenge + 'Connection timed out\n');
+    check('setup: timeout after a good login is not called a password problem', !m.ok && /did not answer in time/.test(m.error), m.error);
+
+    // --- streams sharing a group --------------------------------------------
+    const sh = sharedGroups([
+      { key: 'a/sub', address: '224.1.2.4', port: 40016 }, { key: 'b/sub', address: '224.1.2.4', port: 40016 },
+      { key: 'a/main', address: '224.1.2.4', port: 40000 }, { key: 'c/sub', address: '229.1.2.171', port: 22222 },
+    ]);
+    check('shared: same group and port → each lists the other', JSON.stringify(sh.get('a/sub')) === '["b/sub"]' && JSON.stringify(sh.get('b/sub')) === '["a/sub"]');
+    check('shared: same group, other port, or own group → not shared', !sh.has('a/main') && !sh.has('c/sub'));
+
+    // --- reachability (tells "camera gone" from "multicast didn't arrive") --
+    check('reachable: a listening port', await reachable(`rtsp://127.0.0.1:${port}/x`));
+    const closed = http.createServer();
+    await new Promise((r) => closed.listen(0, '127.0.0.1', r));
+    const closedPort = closed.address().port;
+    await new Promise((r) => closed.close(r));
+    check('reachable: a closed port', !(await reachable(`rtsp://127.0.0.1:${closedPort}/x`)));
 
     // --- sources as saved -------------------------------------------------
     const cam = normaliseCamera({ id: 'mc', name: 'mc', sources: [

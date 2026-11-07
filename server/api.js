@@ -10,8 +10,8 @@ const fs = require('fs');
 const path = require('path');
 const { sendJson, sendError, readJson, sse, sendFile, checkAuth } = require('./http-util');
 const { normaliseCamera, normaliseLayout, parseImport, slugify, defaultLayout, DATA_DIR } = require('./config');
-const { probe } = require('./probe');
-const { discover, lookupMulticast, streamKey } = require('./onvif');
+const { probe, multicastSetup } = require('./probe');
+const { discover, lookupMulticast, streamKey, sharedGroups } = require('./onvif');
 const { scan } = require('./scan');
 const { redact, hostOf } = require('./sources');
 
@@ -293,11 +293,17 @@ function register(router, ctx) {
   }));
 
   /**
-   * Multicast addresses for cameras already set up, from ONVIF.  Body:
+   * Multicast for cameras already set up.  Body:
    *   { ids?: [...] (default every camera with an RTSP stream), onvifPort?: 80,
-   *     enable?: false (true also switches the matched streams to transport 'multicast') }
-   * Stores each matched stream's multicast RTSP address (when it differs from
-   * the unicast one).  Answers { results: [{ id, error?, sources: [{label, matched, multicast, changed}] }] }.
+   *     enable?: false (true also switches the streams that can use it to transport 'multicast') }
+   * Each RTSP stream is checked twice: over ONVIF (its multicast URI and the
+   * group configured there) and by asking the camera for it in RTSP (the
+   * group it really sends to, or why it won't; probe.js).  Streams on
+   * another stream's group and port are reported as `shared` and never
+   * switched: every receiver of that group would get both streams mixed.
+   * ONVIF's multicast URI is stored when it is a different stream address
+   * and the camera accepted it.  Answers { results: [{ id, name, onvifError?,
+   * sources: [{label, matched, profileName, multicast, rtsp, shared, changed}] }] }.
    */
   router.post('/api/multicast/lookup', admin(async (req, res) => {
     const b = await readJson(req);
@@ -305,37 +311,50 @@ function register(router, ctx) {
     const cams = store.cameras.filter((c) => (!wanted || wanted.has(c.id))
       && c.sources.some((s) => s.type === 'rtsp'));
     const port = Number(b.onvifPort) || 80;
-    const results = [];
+    const checked = [];
     let next = 0;
     const worker = async () => {
       while (next < cams.length) {
         const cam = cams[next++];
-        const r = { id: cam.id, name: cam.name, sources: [] };
-        try {
-          const found = await lookupMulticast(cam, { port });
-          let changed = false;
-          const sources = cam.sources.map((src) => {
-            const f = found.sources.find((x) => x.label === src.label);
-            if (!f) return src;
-            const out = { ...src };
-            const mcUrl = f.multicast && f.multicast.rtspUrl;
-            // Stored only when it's a different stream address (credentials aside).
-            if (mcUrl && streamKey(mcUrl) !== streamKey(src.url) && mcUrl !== src.multicastUrl) { out.multicastUrl = mcUrl; changed = true; }
-            if (b.enable && f.multicast && src.transport !== 'multicast') { out.transport = 'multicast'; changed = true; }
-            r.sources.push({ label: src.label, matched: f.matched, profileName: f.profileName,
-              multicast: f.multicast ? { ...f.multicast, rtspUrl: f.multicast.rtspUrl ? redact(f.multicast.rtspUrl) : '' } : null,
-              changed: JSON.stringify(out) !== JSON.stringify(src) });
-            return out;
-          });
-          if (changed) manager.update(cam.id, { sources });
-        } catch (err) {
-          r.error = err.message;
+        let found = null, onvifError = null;
+        try { found = await lookupMulticast(cam, { port }); } catch (err) { onvifError = err.message; }
+        const streams = [];
+        for (const src of cam.sources.filter((s) => s.type === 'rtsp')) {
+          const f = (found && found.sources.find((x) => x.label === src.label)) || null;
+          const onvifUrl = f && f.multicast && f.multicast.rtspUrl;
+          // ONVIF's multicast URI when it names another stream address, else the stored one.
+          const multicastUrl = onvifUrl && streamKey(onvifUrl) !== streamKey(src.url) ? onvifUrl : src.multicastUrl;
+          streams.push({ src, f, multicastUrl, rtsp: await multicastSetup({ ...src, multicastUrl }, store.settings) });
         }
-        results.push(r);
+        checked.push({ cam, onvifError, streams });
       }
     };
     await Promise.all(Array.from({ length: Math.min(6, cams.length) }, worker));
-    results.sort((a, b2) => store.cameras.findIndex((c) => c.id === a.id) - store.cameras.findIndex((c) => c.id === b2.id));
+    checked.sort((a, b2) => store.cameras.indexOf(a.cam) - store.cameras.indexOf(b2.cam));
+
+    const shared = sharedGroups(checked.flatMap(({ cam, streams }) => streams.filter((s) => s.rtsp.ok)
+      .map((s) => ({ key: `${cam.id}/${s.src.label}`, address: s.rtsp.address, port: s.rtsp.port }))));
+    const results = checked.map(({ cam, onvifError, streams }) => {
+      const r = { id: cam.id, name: cam.name, sources: [] };
+      if (onvifError) r.onvifError = onvifError;
+      let changed = false;
+      const sources = cam.sources.map((src) => {
+        const s = streams.find((x) => x.src === src);
+        if (!s) return src;
+        const out = { ...src };
+        const others = shared.get(`${cam.id}/${src.label}`) || [];
+        if (s.rtsp.ok && s.multicastUrl && s.multicastUrl !== src.multicastUrl) out.multicastUrl = s.multicastUrl;
+        if (b.enable && s.rtsp.ok && !others.length) out.transport = 'multicast';
+        const c = JSON.stringify(out) !== JSON.stringify(src);
+        changed = changed || c;
+        r.sources.push({ label: src.label, matched: s.f ? s.f.matched : null, profileName: s.f ? s.f.profileName : null,
+          multicast: s.f && s.f.multicast ? { ...s.f.multicast, rtspUrl: s.f.multicast.rtspUrl ? redact(s.f.multicast.rtspUrl) : '' } : null,
+          rtsp: s.rtsp, shared: others, changed: c });
+        return out;
+      });
+      if (changed) manager.update(cam.id, { sources });
+      return r;
+    });
     sendJson(res, 200, { results });
   }));
 

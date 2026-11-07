@@ -210,7 +210,19 @@ same cameras too.
   - For cameras already set up, use Settings → Streaming → *Look up
     multicast on all cameras (ONVIF)*. It asks each camera on port 80 with
     the login from its stream URL, and can switch the ones that offer it.
+  - The lookup also asks each stream's RTSP server for multicast and
+    reports the group and port it **really** sends to, or why it won't
+    (404, 461, no multicast address set, no valid answer). ONVIF's group
+    can't be relied on: Dahua cameras report one there and send to another.
   - API: `POST /api/multicast/lookup {"enable": true}`.
+- **Give every camera its own multicast address first.** Dahua cameras all
+  ship with group `224.1.2.4` and the same ports (main 40000, sub 40016), so
+  two of them on multicast arrive **mixed** at every receiver. The lookup
+  lists such streams under *Group shared with another stream* and never
+  switches them; set a unique address in each camera's web page (Setup →
+  Network → Multicast) and run it again. *Try multicast for every RTSP
+  camera* does **not** check this, so don't use it until the lookup shows
+  no shared groups.
 - **cameras.xml:**
   - per source: `transport="multicast"` and an optional
     `multicast-url="rtsp://…"`;
@@ -221,9 +233,18 @@ network:** a Linux host with `network_mode: host` (see `docker-compose.yml`),
 and switches that forward multicast. It never arrives on **Docker Desktop**
 (its VM sits behind NAT) or a bridged network.
 
+On a PC with several network adapters, the operating system joins the group
+on the adapter its multicast route picks, which may not be the camera
+network's. FFmpeg's RTSP client can't be told which one. On a Linux host,
+add `ip route add 224.0.0.0/4 dev <camera-network interface>` if the
+lookup's groups never arrive.
+
 LookyLooky copes with that by itself:
 - **No picture over multicast within about 8 s:** the stream switches to
-  unicast (the source's own TCP/UDP setting).
+  unicast (the source's own TCP/UDP setting). Not when the camera doesn't
+  answer at all (unplugged, network down): that is reported as *The camera
+  cannot be reached on the network* and retried, and multicast is tried
+  again once it is back.
 - **Stalls twice within 15 minutes while on multicast:** it also switches to
   unicast. This is the usual symptom of a switch with IGMP snooping but no
   IGMP querier.

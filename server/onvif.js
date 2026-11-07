@@ -258,6 +258,9 @@ async function lookupMulticast(cam, { port = 80 } = {}) {
     host: u.hostname, port,
     user: decodeURIComponent(u.username || ''), pass: decodeURIComponent(u.password || ''),
   });
+  // Something answered on the port (a UniFi Protect console does) but it is
+  // not an ONVIF camera; "no multicast" would claim we asked it.
+  if (!d.streams.length) throw new Error(`ONVIF on ${u.hostname}:${port} listed no video streams (not an ONVIF camera?)`);
   const byKey = new Map(d.streams.map((st) => [streamKey(st.rtspUrl), st]));
   const byUrl = new Map(d.streams.map((st) => [st.rtspUrl, st]));
   return {
@@ -274,4 +277,25 @@ async function lookupMulticast(cam, { port = 80 } = {}) {
   };
 }
 
-module.exports = { discover, withCredentials, lookupMulticast, streamKey };
+/**
+ * Streams that send to the same multicast group and port as another stream.
+ * Dahua cameras all ship with group 224.1.2.4 and the same ports, so two of
+ * them on multicast arrive mixed at every receiver until each camera is given
+ * its own address.
+ * @param {Array<{key, address, port}>} entries
+ * @returns {Map<string, string[]>} key -> the other keys on its group and port
+ */
+function sharedGroups(entries) {
+  const byGroup = new Map();
+  for (const e of entries) {
+    const g = `${e.address}:${e.port}`;
+    byGroup.set(g, [...(byGroup.get(g) || []), e.key]);
+  }
+  const out = new Map();
+  for (const keys of byGroup.values()) {
+    if (keys.length > 1) for (const k of keys) out.set(k, keys.filter((x) => x !== k));
+  }
+  return out;
+}
+
+module.exports = { discover, withCredentials, lookupMulticast, streamKey, sharedGroups };

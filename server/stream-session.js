@@ -35,7 +35,7 @@ const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
 const { Fmp4Parser } = require('./fmp4');
 const P = require('./protocol');
-const { inputArgs, friendlyError, redact, clearSession, noteMulticast, MULTICAST_RETRY_MS } = require('./sources');
+const { inputArgs, friendlyError, redact, clearSession, noteMulticast, MULTICAST_RETRY_MS, reachable } = require('./sources');
 
 const SOFT_CAP = 1.5 * 1024 * 1024;
 const HARD_CAP = 8 * 1024 * 1024;
@@ -312,11 +312,19 @@ class StreamSession {
     // container (Docker Desktop, a bridged network, a router that doesn't
     // forward it).  Fall back to unicast TCP, and let the next starts of this
     // stream skip multicast for a while (sources.js).
+    // Only if the camera itself answers, though: when it is unplugged or the
+    // network is down every transport fails alike, and blaming multicast
+    // would keep this stream off it for an hour after the network returns.
     if (p.multicast && this.liveSince === 0 && !/rejected the username/.test(why)) {
-      this.noMulticastUntil = Date.now() + MULTICAST_RETRY_MS;
-      noteMulticast(`${this.cameraId}/${this.label}`, false);
-      this.log('no picture over multicast — switching this stream to unicast');
-      this._spawn();
+      reachable(this.source.multicastUrl || this.source.url).then((ok) => {
+        // Stopped, or started again some other way, while we were checking.
+        if (this.active || this.pending || ['idle', 'stopped', 'failed'].includes(this.state)) return;
+        if (!ok) { this._retryOrFail('The camera cannot be reached on the network'); return; }
+        this.noMulticastUntil = Date.now() + MULTICAST_RETRY_MS;
+        noteMulticast(`${this.cameraId}/${this.label}`, false);
+        this.log('no picture over multicast — switching this stream to unicast');
+        this._spawn();
+      });
       return;
     }
     // Multicast that plays, then stalls, then plays again after a rejoin is
@@ -352,6 +360,11 @@ class StreamSession {
       this._spawn();
       return;
     }
+    this._retryOrFail(why);
+  }
+
+  /** After a pipeline exit no special case handled: back off and retry, or give up. */
+  _retryOrFail(why) {
     this.lastError = why;
     if (/rejected the username/.test(why)) clearSession(`${this.cameraId}/${this.label}`);
     this.log(`exited: ${why}`);

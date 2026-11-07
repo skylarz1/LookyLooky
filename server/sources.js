@@ -16,6 +16,7 @@
 
 const http = require('http');
 const https = require('https');
+const net = require('net');
 const { sourceType } = require('./config');
 
 /* --- Session login (from camera-proxy.js) -------------------------------- */
@@ -125,6 +126,25 @@ function multicastState(key) {
 }
 
 function noteMulticast(key, ok) { if (key) multicastMemory.set(key, { ok: !!ok, at: Date.now() }); }
+
+/**
+ * Whether anything accepts a TCP connection at a URL's host and port (RTSP
+ * 554, HTTP 80, HTTPS 443 unless the URL says otherwise).  Tells "the camera
+ * is gone" (unplugged, network down) apart from "the camera answered but no
+ * video arrived" — only the second says anything about multicast.
+ */
+function reachable(url, timeoutMs = 2000) {
+  return new Promise((resolve) => {
+    let u;
+    try { u = new URL(String(url).replace(/^rtsps?:/i, 'http:')); } catch { resolve(false); return; }
+    const port = Number(u.port) || (/^rtsps?:/i.test(url) ? 554 : /^https:/i.test(url) ? 443 : 80);
+    const sock = net.connect({ host: u.hostname, port, timeout: timeoutMs });
+    const done = (ok) => { sock.destroy(); resolve(ok); };
+    sock.once('connect', () => done(true));
+    sock.once('timeout', () => done(false));
+    sock.once('error', () => done(false));
+  });
+}
 /** Forget what multicast did, for every stream or for one camera's ('cam-01/'). */
 function clearMulticastMemory(prefix = '') {
   for (const k of [...multicastMemory.keys()]) if (k.startsWith(prefix)) multicastMemory.delete(k);
@@ -253,4 +273,5 @@ function friendlyError(stderr) {
 module.exports = {
   inputArgs, buildUrl, redact, hostOf, friendlyError, login, getSession, clearSession, clearAllSessions,
   httpRequest, basicHeader, wantsMulticast, multicastState, noteMulticast, clearMulticastMemory, MULTICAST_RETRY_MS,
+  reachable,
 };

@@ -3538,19 +3538,29 @@
       try {
         const res = await sendJSON('/api/multicast/lookup', 'POST', { enable });
         if (!res.ok) { out.textContent = res.data.error || `Lookup failed (${res.status})`; return; }
-        const offer = [], none = [], failed = [];
+        // Per camera: what each stream's RTSP server answered (the group it
+        // really sends to), plus ONVIF's failure if it couldn't be asked.
+        const ready = [], sharedOut = [], refused = [], onvifFailed = [];
+        let sharedCount = 0;
         for (const r of res.data.results) {
-          if (r.error) { failed.push(`${r.name || r.id}: ${r.error}`); continue; }
-          const mc = r.sources.filter(x => x.multicast);
-          if (!mc.length) { none.push(r.name || r.id); continue; }
-          const groups = mc.map(x => x.multicast.address ? `${x.label} ${x.multicast.address}${x.multicast.port ? ':' + x.multicast.port : ''}` : x.label);
-          offer.push(`${r.name || r.id} (${groups.join(', ')})${r.sources.some(x => x.changed) ? ' — saved' : ''}`);
+          const name = r.name || r.id;
+          if (r.onvifError) onvifFailed.push(`${name}: ${r.onvifError}`);
+          const ok = r.sources.filter(x => x.rtsp && x.rtsp.ok);
+          const no = r.sources.filter(x => x.rtsp && !x.rtsp.ok);
+          const grp = x => `${x.label} ${x.rtsp.address}${x.rtsp.port ? ':' + x.rtsp.port : ''}`;
+          const clash = ok.filter(x => x.shared && x.shared.length);
+          sharedCount += clash.length;
+          if (clash.length) sharedOut.push(`${name}: ${clash.map(x => `${grp(x)} also used by ${x.shared.join(', ')}`).join('; ')}`);
+          const free = ok.filter(x => !x.shared || !x.shared.length);
+          if (free.length) ready.push(`${name} (${free.map(grp).join(', ')})${r.sources.some(x => x.changed) ? ' — saved' : ''}`);
+          if (no.length) refused.push(`${name}: ${no.map(x => `${x.label} ${x.rtsp.error}`).join('; ')}`);
         }
         out.textContent = [
-          `Offer multicast: ${offer.length}${offer.length ? '\n  ' + offer.join('\n  ') : ''}`,
-          `No multicast: ${none.length}${none.length ? ' — ' + none.join(', ') : ''}`,
-          `Couldn't ask: ${failed.length}${failed.length ? '\n  ' + failed.join('\n  ') : ''}`,
-          enable ? 'Cameras that offer it now use Multicast (falling back to TCP where it can\'t arrive).'
+          `Ready for multicast (own group): ${ready.length}${ready.length ? '\n  ' + ready.join('\n  ') : ''}`,
+          `Group shared with another stream: ${sharedCount}${sharedOut.length ? ' — not switched; give each camera its own multicast address in its web page first\n  ' + sharedOut.join('\n  ') : ''}`,
+          `No multicast: ${refused.length}${refused.length ? '\n  ' + refused.join('\n  ') : ''}`,
+          `ONVIF couldn't be asked: ${onvifFailed.length}${onvifFailed.length ? '\n  ' + onvifFailed.join('\n  ') : ''}`,
+          enable ? 'Streams with a group of their own now use Multicast (falling back to TCP where it can\'t arrive).'
                  : 'Nothing switched: choose Multicast per camera, set "Try multicast for every RTSP camera" above, or tick the box and run again.',
         ].join('\n');
         setTimeout(refreshCameras, 1000);
