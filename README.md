@@ -50,6 +50,7 @@ browsers can be checked before any real camera is added.
 | `/cameras.html` (`/dashboard`) | Dashboard: cameras, layouts, drag and drop, audio focus, fullscreen and keypad focus, recordings, network scan, ONVIF discovery, settings, recycle, import and export |
 | `/camera-view.html?layout=<id or name>[&quality=high\|low]` | Read-only board for wall displays and kiosks |
 | `/wall.html?layout=<id or name>[&camera=<id>][&quality=high\|low]` | The camera wall: one 16:9 main pane over up to six previews. Tap a preview to put it up; audio follows the main pane |
+| `/stats` | Statistics: server load, every stream and every viewer's delay (admin; see "Statistics and load testing") |
 | `/setup.html` | Browser capability check and certificate install steps |
 | `/camera-1.html?camera=<id>` | A single camera's raw stream drawn to a canvas (test page) |
 | `/stream/<id>/mjpeg`, `/stream/<id>/snapshot` | MJPEG and JPEG for other tools (plain HTTP works) |
@@ -285,6 +286,48 @@ COMPOSE_FILE=docker-compose.yml:docker-compose.host.yml:docker-compose.override.
   the kernel joins on the default-route interface and nothing arrives.
 - Ports 8080/8443 still answer directly, for tools and as a fallback.
 
+## Statistics and load testing
+
+**`/stats`** (admin, linked from the dashboard header) updates every 2 s:
+
+- **Server:** host CPU, LookyLooky's and FFmpeg's CPU, the event-loop
+  delay, memory, and each network interface in and out. Every frame for every
+  viewer passes through the one event loop, so a rising loop delay turns into
+  lag for everyone. Charts cover the last 30 minutes.
+- **Streams:** state, multicast or unicast, frames per second and bitrate in
+  from the camera, viewers, bitrate out, and each FFmpeg's CPU and memory.
+- **Viewers:** every open pane.
+  - **Queue:** what the server still has to send it, as a size and as time at
+    the stream's bitrate. This is the lag the server adds.
+  - **Reported by the pane** every 5 s: frames drawn and dropped, decoder
+    backlog, and the median and 95th percentile delay from the server to the
+    pane (**Arrival**) and to the screen (**Screen**). The delays use the
+    server's clock (from a ping) with the stream's own input delay taken off,
+    so camera clock drift doesn't count.
+
+The JSON behind it is `/api/stats?viewers=1&history=1`; the `viewers` part
+needs the admin password.
+
+**Load tests** (run them from another machine than the server):
+
+```bash
+# Protocol-level viewers in bulk: 10 per camera on the substreams for 10 minutes
+NODE_EXTRA_CA_CERTS=ca.crt LOOKY_ADMIN_PASSWORD=... node tools/loadtest.js --url https://looky.local --ip 192.168.1.124 --variant sub --per 10 --minutes 10
+# Real headless Chromium boards of one layout, all panes pinned to the main streams
+LOOKY_ADMIN_PASSWORD=... node tools/browserload.js --url https://looky.local --ip 192.168.1.124 --layout <id> --quality high --pages 4 --minutes 10
+```
+
+- `loadtest.js` prints a line every 10 s:
+  - viewers connected, frames per second per viewer, and Mbit/s received;
+  - lag p50, p95 and max, and the worst viewer;
+  - stalls (a gap of more than three frame intervals) and closes;
+  - the server's CPU, loop delay and bitrate out.
+- At the end it prints the **lag trend** in ms per minute; anything clearly
+  above 0 means lag is building up. It writes the details to a JSON file.
+- `browserload.js` reports the same thing as the real browsers see it.
+  Headless Chromium decodes in software and has no H.265 decoder, so H.265
+  panes fail there even though they play in a real browser.
+
 ## Using it from another stack
 
 1. **Same compose project.** Copy the `lookylooky` service and its volume
@@ -323,7 +366,7 @@ COMPOSE_FILE=docker-compose.yml:docker-compose.host.yml:docker-compose.override.
 
 | Method | Path | |
 |---|---|---|
-| GET | `/api/info`, `/api/stats`, `/api/health` | Server identity, buffer, decode budget and quality policy; live stats |
+| GET | `/api/info`, `/api/stats`, `/api/health` | Server identity, buffer, decode budget and quality policy; live stats (`?viewers=1` adds every viewer, admin; `?history=1` the last 30 min) |
 | GET / POST | `/api/cameras` | List (no credentials); add. Each stream is tested first, and a failure returns 422 `STREAM_TEST_FAILED` with the reasons; send `force:true` to save anyway |
 | GET / PUT / DELETE | `/api/cameras/:id` | Full definition (admin) / edit / remove |
 | POST | `/api/cameras/:id/start` `stop` `restart` | |
@@ -344,7 +387,8 @@ COMPOSE_FILE=docker-compose.yml:docker-compose.host.yml:docker-compose.override.
 server/            Node server (only dependency: ws)
   index.js         HTTP + HTTPS (HTTPS port also redirects plain HTTP), static files, boot
   stream-session.js  one FFmpeg per camera stream, viewers, GOP cache, backpressure, recycle
-  fmp4.js          fragmented-MP4 parser
+  fmp4.js          fragmented-MP4 parser; completes H.265 configs from in-band parameter sets
+  metrics.js       host, process and FFmpeg load for /api/stats
   protocol.js      binary wire protocol
   mjpeg.js         thumbnails / MJPEG / snapshots (decoded from the running stream)
   cameras.js       camera list, status, sessions, recycle
@@ -355,7 +399,8 @@ server/            Node server (only dependency: ws)
   legacy-proxy.js  camera-proxy compatible endpoints
 public/            pages, the Claudifer viewer (js/camera), the wall widget, noodleman, styles
 config/            first-boot seed (real files are git-ignored; *.example.xml are templates)
-test/              e2e.js (browser smoke test), features.js (audio / zoom / quality)
+test/              e2e.js (browser smoke test), features.js (audio / zoom / quality), hevc.js, onvif.js
+tools/             loadtest.js (many viewers), browserload.js (headless Chromium boards)
 docs/WINDOWS.md    Docker Desktop on Windows 11, step by step
 ```
 

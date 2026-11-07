@@ -18,7 +18,7 @@ const { redact, hostOf } = require('./sources');
 const VERSION = require('../package.json').version;
 
 function register(router, ctx) {
-  const { store, manager, recorder, hub, info } = ctx;
+  const { store, manager, recorder, hub, info, metrics } = ctx;
   const admin = (fn) => async (req, res, params, url) => {
     if (!checkAuth(req, res)) return;
     return fn(req, res, params, url);
@@ -43,17 +43,24 @@ function register(router, ctx) {
     });
   });
 
-  router.get('/api/stats', (req, res) => {
+  /** ?viewers=1 adds every connected viewer, ?history=1 the last 30 min of host samples. */
+  router.get('/api/stats', (req, res, params, url) => {
     const st = manager.stats();
+    const q = url ? url.searchParams : new URLSearchParams();
+    if (q.has('viewers') && !checkAuth(req, res)) return;  // addresses and browsers: admin only
     sendJson(res, 200, {
+      at: Date.now(),
       activeStreams: st.activeStreams,
       totalClients: hub.viewers.size,
       memory: { app: process.memoryUsage(), ffmpeg: manager.ffmpegMemory() },
       uptime: process.uptime(),
       processes: st.processes,
+      host: metrics ? metrics.latest : null,
       sessions: st.sessions,
       mjpeg: st.mjpeg,
       recording: recorder.activeInfo(),
+      viewers: q.has('viewers') ? [...hub.viewers].map((v) => v.info()) : undefined,
+      history: q.has('history') && metrics ? metrics.history : undefined,
     });
   });
 

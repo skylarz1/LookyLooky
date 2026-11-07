@@ -113,7 +113,10 @@ function parseMoov(buf, moov) {
         track.record = Buffer.from(buf.subarray(hvcC.body, hvcC.end));
         track.fourCC = 'hvc1';
         track.codec = 'hevc';
-        track.codecString = hevcCodecString(track.record);
+        // An hvcC without its VPS (or an empty one) can't configure a decoder;
+        // the pipeline completes it from the stream's in-band parameter sets.
+        track.complete = hvccComplete(track.record);
+        track.codecString = track.record.length >= 23 ? hevcCodecString(track.record) : null;
       } else {
         track.codec = entry.type;
       }
@@ -135,6 +138,180 @@ function parseMoov(buf, moov) {
     tracks.set(id, track);
   }
   return tracks;
+}
+
+/* --- HEVC parameter sets ----------------------------------------------------
+ * Some cameras (Uniview) leave the VPS out of their SDP's sprop-* parameters
+ * but send VPS/SPS/PPS in-band before every keyframe.  FFmpeg then writes an
+ * hvcC with no VPS, or (tagged hvc1) an empty one and strips the in-band
+ * copies; no browser decoder can be configured from that.  For those streams
+ * the pipeline asks FFmpeg for hev1, which keeps the in-band copies, and
+ * builds a complete hvcC from the first keyframe with these helpers.
+ */
+
+const HEVC_VPS = 32, HEVC_SPS = 33, HEVC_PPS = 34;
+const isParamSet = (t) => t === HEVC_VPS || t === HEVC_SPS || t === HEVC_PPS;
+
+/** NAL arrays of an hvcC: Map<nalType, Buffer[]>, or null when malformed. */
+function hvccArrays(rec) {
+  if (!rec || rec.length < 23) return null;
+  const out = new Map();
+  let p = 23;
+  for (let i = 0; i < rec[22]; i++) {
+    if (p + 3 > rec.length) return null;
+    const type = rec[p] & 0x3f;
+    const n = rec.readUInt16BE(p + 1);
+    p += 3;
+    const list = out.get(type) || [];
+    for (let j = 0; j < n; j++) {
+      if (p + 2 > rec.length) return null;
+      const len = rec.readUInt16BE(p);
+      if (p + 2 + len > rec.length) return null;
+      list.push(rec.subarray(p + 2, p + 2 + len));
+      p += 2 + len;
+    }
+    out.set(type, list);
+  }
+  return out;
+}
+
+function hvccComplete(rec) {
+  const a = hvccArrays(rec);
+  return !!a && [HEVC_VPS, HEVC_SPS, HEVC_PPS].every((t) => (a.get(t) || []).length > 0);
+}
+
+/** A 4-byte length-prefixed access unit (as FFmpeg writes it) -> [{ type, data }]. */
+function splitNals(au) {
+  const out = [];
+  let p = 0;
+  while (p + 4 <= au.length) {
+    const len = au.readUInt32BE(p);
+    if (len === 0 || p + 4 + len > au.length) break;
+    out.push({ type: (au[p + 4] >> 1) & 0x3f, data: au.subarray(p + 4, p + 4 + len) });
+    p += 4 + len;
+  }
+  return out;
+}
+
+function joinNals(nals) {
+  const parts = [];
+  for (const n of nals) {
+    const len = Buffer.allocUnsafe(4);
+    len.writeUInt32BE(n.data.length, 0);
+    parts.push(len, n.data);
+  }
+  return Buffer.concat(parts);
+}
+
+/** The in-band VPS/SPS/PPS of an access unit plus the rest of it, or null if one is missing. */
+function inbandParamSets(au) {
+  const nals = splitNals(au);
+  const vps = nals.find((n) => n.type === HEVC_VPS);
+  const sps = nals.find((n) => n.type === HEVC_SPS);
+  const pps = nals.find((n) => n.type === HEVC_PPS);
+  if (!vps || !sps || !pps) return null;
+  return { vps: vps.data, sps: sps.data, pps: pps.data, rest: joinNals(nals.filter((n) => !isParamSet(n.type))) };
+}
+
+/** NAL payload with the emulation-prevention bytes (00 00 03) removed. */
+function rbsp(nal) {
+  const out = [];
+  for (let i = 0; i < nal.length; i++) {
+    if (i >= 2 && nal[i] === 3 && nal[i - 1] === 0 && nal[i - 2] === 0) continue;
+    out.push(nal[i]);
+  }
+  return Buffer.from(out);
+}
+
+class Bits {
+  constructor(buf) { this.buf = buf; this.pos = 0; }
+  u(n) {
+    let v = 0;
+    for (let i = 0; i < n; i++) {
+      const byte = this.buf[this.pos >> 3];
+      if (byte === undefined) throw new Error('SPS ends early');
+      v = v * 2 + ((byte >> (7 - (this.pos & 7))) & 1);
+      this.pos++;
+    }
+    return v;
+  }
+  ue() {
+    let zeros = 0;
+    while (this.u(1) === 0) if (++zeros > 31) throw new Error('bad exp-Golomb code in SPS');
+    return 2 ** zeros - 1 + this.u(zeros);
+  }
+}
+
+/** An HEVCDecoderConfigurationRecord (ISO/IEC 14496-15) built from one VPS, SPS and PPS. */
+function buildHvcc(vps, sps, pps) {
+  const b = new Bits(rbsp(sps));
+  b.u(16);                              // NAL unit header
+  b.u(4);                               // sps_video_parameter_set_id
+  const maxSubLayersMinus1 = b.u(3);
+  const temporalIdNesting = b.u(1);
+  const ptlStart = b.pos >> 3;          // general profile_tier_level: 12 bytes, byte aligned
+  b.pos += 96;
+  const subProfile = [], subLevel = [];
+  for (let i = 0; i < maxSubLayersMinus1; i++) { subProfile.push(b.u(1)); subLevel.push(b.u(1)); }
+  if (maxSubLayersMinus1 > 0) for (let i = maxSubLayersMinus1; i < 8; i++) b.u(2);
+  for (let i = 0; i < maxSubLayersMinus1; i++) { if (subProfile[i]) b.pos += 88; if (subLevel[i]) b.pos += 8; }
+  b.ue();                               // sps_seq_parameter_set_id
+  const chroma = b.ue();
+  if (chroma === 3) b.u(1);             // separate_colour_plane_flag
+  b.ue(); b.ue();                       // picture width / height
+  if (b.u(1)) { b.ue(); b.ue(); b.ue(); b.ue(); }  // conformance window
+  const depthLuma = b.ue();
+  const depthChroma = b.ue();
+
+  const head = Buffer.alloc(23);
+  head[0] = 1;
+  b.buf.copy(head, 1, ptlStart, ptlStart + 12);  // profile space/tier/idc, compat and constraint flags, level
+  head.writeUInt16BE(0xf000, 13);       // min_spatial_segmentation_idc 0
+  head[15] = 0xfc;                      // parallelismType 0
+  head[16] = 0xfc | chroma;
+  head[17] = 0xf8 | depthLuma;
+  head[18] = 0xf8 | depthChroma;
+  head[21] = ((maxSubLayersMinus1 + 1) << 3) | (temporalIdNesting << 2) | 3;  // 4-byte NAL lengths
+  head[22] = 3;
+  const parts = [head];
+  for (const [type, nal] of [[HEVC_VPS, vps], [HEVC_SPS, sps], [HEVC_PPS, pps]]) {
+    const a = Buffer.alloc(5);
+    a[0] = 0x80 | type;                 // array_completeness: every set of this type is here
+    a.writeUInt16BE(1, 1);
+    a.writeUInt16BE(nal.length, 3);
+    parts.push(a, nal);
+  }
+  return Buffer.concat(parts);
+}
+
+/** An init segment (ftyp + moov) with its video track's hvcC replaced by `rec`. */
+function replaceHvcc(init, rec) {
+  const parents = [];
+  const find = (start, end) => {
+    for (const box of readBoxes(init, start, end)) {
+      if (box.type === 'hvcC') return box;
+      let kids = null;
+      if (['moov', 'trak', 'mdia', 'minf', 'stbl'].includes(box.type)) kids = box.body;
+      else if (box.type === 'stsd') kids = box.body + 8;
+      else if (box.type === 'hvc1' || box.type === 'hev1') kids = box.body + 78;
+      if (kids === null) continue;
+      parents.push(box);
+      const hit = find(kids, box.end);
+      if (hit) return hit;
+      parents.pop();
+    }
+    return null;
+  };
+  const hvcC = find(0, init.length);
+  if (!hvcC) return init;
+  const box = Buffer.alloc(8 + rec.length);
+  box.writeUInt32BE(box.length, 0);
+  box.write('hvcC', 4, 'latin1');
+  rec.copy(box, 8);
+  const out = Buffer.concat([init.subarray(0, hvcC.start), box, init.subarray(hvcC.end)]);
+  const delta = box.length - (hvcC.end - hvcC.start);
+  for (const p of parents) out.writeUInt32BE(out.readUInt32BE(p.start) + delta, p.start);
+  return out;
 }
 
 class Fmp4Parser extends EventEmitter {
@@ -274,4 +451,6 @@ class Fmp4Parser extends EventEmitter {
   }
 }
 
-module.exports = { Fmp4Parser, avcCodecString, hevcCodecString };
+module.exports = {
+  Fmp4Parser, avcCodecString, hevcCodecString, hvccComplete, inbandParamSets, buildHvcc, replaceHvcc,
+};
