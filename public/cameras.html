@@ -200,6 +200,12 @@
       padding: 24px;
       width: 480px;
       max-width: 90vw;
+      /* Taller dialogs (Server Settings, a long multicast lookup) scroll
+         inside the dialog instead of running off a centred, fixed overlay. */
+      max-height: calc(100vh - 32px);
+      max-height: calc(100dvh - 32px);
+      overflow-y: auto;
+      overscroll-behavior: contain;
     }
     .modal h2 { font-size: 18px; margin-bottom: 16px; }
     .form-group { margin-bottom: 14px; }
