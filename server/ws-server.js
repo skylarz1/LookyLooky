@@ -32,9 +32,13 @@ function cleanReport(msg) {
   const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
   const spread = (o) => (o && typeof o === 'object' ? { p50: num(o.p50), p95: num(o.p95), max: num(o.max) } : null);
   const out = { at: Date.now() };
-  for (const k of ['fps', 'dropped', 'decodeQueue', 'videoQueue', 'reanchors', 'inputShed', 'pausedDrops', 'rebuilds', 'rttMs']) out[k] = num(msg[k]);
+  const text = (v, n) => (typeof v === 'string' && v ? v.slice(0, n) : null);
+  for (const k of ['fps', 'dropped', 'decodeQueue', 'videoQueue', 'reanchors', 'inputShed', 'pausedDrops', 'rebuilds', 'rttMs', 'decoderOutputs']) out[k] = num(msg[k]);
   out.software = msg.software === true;
   out.mse = msg.mse === true;
+  out.codec = text(msg.codec, 40);
+  out.mseCodec = text(msg.mseCodec, 40);
+  out.decoderError = text(msg.decoderError, 120);
   out.visible = msg.visible !== false;
   out.arrival = spread(msg.arrival);
   out.render = spread(msg.render);

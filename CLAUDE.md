@@ -95,11 +95,14 @@ test/network.js           unreachable cameras: the TCP knock, STREAM_PROBLEM, wa
   fail every configure. Chunks are held during the probe so the first
   keyframe isn't lost.
 - **A probe that says yes can still be wrong** (a Windows 10 Chrome: every
-  H.265 decode failed). Two dead decoders with no output, and the client
+  H.265 decode failed). Two dead decoders with nothing drawn, and the client
   switches to `msePlayer.js`: one-sample fMP4 fragments (µs timescale, so
   `tfdt` = PTS) into a hidden `<video>`, frames drawn on the pane's canvas,
   so covers and stats don't change. Remembered per fourCC in localStorage for
-  a day; `?decoder=mse|webcodecs` forces it.
+  a day; `?decoder=mse|webcodecs` forces it. If `<video>` rejects the server's
+  exact HEVC string, `mseCodecFor` opens it with the common `hvc1.1.6.L…B0`.
+  Viewer reports carry `codec`, `mseCodec`, `decoderOutputs` and
+  `decoderError`, so `/stats` can explain a black pane without a console.
 - **`CameraGrid.destroyAll()` keeps the grid's listeners; `destroy()`
   removes them.** The dashboard reuses the grid after `destroyAll()` on every
   layout switch.

@@ -178,7 +178,7 @@
       const head = '<tr><th class="l">Address</th><th class="l">Browser</th><th class="l">Camera</th><th class="l">Stream</th><th>Since</th><th>Queue</th><th>Skips</th><th>fps</th><th>Dropped</th><th>Decode q</th><th>Arrival ms</th><th>Screen ms</th><th>RTT ms</th><th class="l">Notes</th></tr>';
       document.getElementById('viewers').innerHTML = head + (rows.length ? rows.map((v) => {
         const r = v.report || {};
-        const notes = [r.mse ? '<video> fallback' : '', r.software ? 'software decode' : '', r.visible === false ? 'hidden' : '', r.inputShed ? `shed ${r.inputShed}` : '', r.rebuilds ? `decoder rebuilt ${r.rebuilds}×` : ''].filter(Boolean).join(', ');
+        const notes = [r.mse ? '<video> fallback' : '', r.software ? 'software decode' : '', r.visible === false ? 'hidden' : '', r.inputShed ? `shed ${r.inputShed}` : '', r.rebuilds ? `decoder rebuilt ${r.rebuilds}×` : '', r.rebuilds && r.decoderError && !r.fps ? `${r.decoderError}${r.mseCodec ? '' : ' (no <video> fallback for ' + r.codec + ')'}` : ''].filter(Boolean).join(', ');
         return `<tr><td>${esc(v.addr)}</td><td class="l" title="${esc(v.userAgent)}">${esc(browser(v.userAgent))}</td>
           <td class="l">${esc(names[v.cameraId] || v.cameraId)}</td><td class="l">${esc(v.variant)}</td><td>${time(v.connectedAt)}</td>
           <td class="${cls(v.queueMs, 250, 1000)}">${v.queueKB} KB · ${v.queueMs} ms</td><td class="${v.skips ? 'warn' : ''}">${v.skips}</td>
