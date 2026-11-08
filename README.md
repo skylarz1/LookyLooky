@@ -197,6 +197,14 @@ already has a trusted certificate. On the machine running Docker,
 - **HEVC cameras:** they play on Safari and on Chrome machines with hardware
   HEVC decode. For others, set the camera's **Video** to **Convert to H.264**,
   or switch its substream to H.264.
+- **When WebCodecs can't decode but `<video>` can:** some PCs (a Windows 10
+  Chrome on 2026-11-07) accept H.265 in WebCodecs, then fail every frame,
+  while the same stream plays in a `<video>` element. After two such
+  failures with no picture, the pane switches to a hidden `<video>` fed over
+  Media Source Extensions and draws its frames on the same canvas. Every pane
+  on the page follows, and the browser remembers it for a day. It costs about
+  0.1 s of extra delay. `/stats` shows *<video> fallback* in the viewer's
+  notes. `?decoder=mse` or `?decoder=webcodecs` in a page URL forces one.
 - **iPhone:** it has no element fullscreen, so fullscreen is emulated.
 
 ## Configuration

@@ -68,6 +68,8 @@ function parseProblem(view) {
     text:  new TextDecoder().decode(new Uint8Array(view.buffer, view.byteOffset + 7, view.byteLength - 7)),
   };
 }
+import { MsePlayer, mseSupports } from './msePlayer.js';
+
 const FLAG_KEYFRAME    = 0x01;
 const FLAG_CATCHUP     = 0x02;
 
@@ -243,6 +245,35 @@ function hardwareModeFor(codec, description) {
   })();
   _hwProbe.set(codec, p);
   return p;
+}
+
+// ─── <video> fallback memory ───────────────────────────────────────────
+//
+// Once WebCodecs fails on a codec that this browser's <video> element plays
+// (msePlayer.js), every pane on the page uses <video> for it, and so does
+// the next page load for a day — a driver update may fix WebCodecs.
+// `?decoder=mse` or `?decoder=webcodecs` in the page URL forces one.
+const MSE_MEMORY_KEY = 'looky.mseFallback';
+const MSE_MEMORY_MS  = 24 * 60 * 60 * 1000;
+const _mseFourCCs = new Set();
+const _forcedDecoder = (() => {
+  try { return new URLSearchParams(location.search).get('decoder'); } catch { return null; }
+})();
+function useMseFor(fourCC, codec) {
+  if (_forcedDecoder === 'webcodecs' || !mseSupports(codec)) return false;
+  if (_forcedDecoder === 'mse' || _mseFourCCs.has(fourCC)) return true;
+  try {
+    const at = JSON.parse(localStorage.getItem(MSE_MEMORY_KEY) || '{}')[fourCC];
+    return !!at && Date.now() - at < MSE_MEMORY_MS;
+  } catch { return false; }
+}
+function rememberMse(fourCC) {
+  _mseFourCCs.add(fourCC);
+  try {
+    const m = JSON.parse(localStorage.getItem(MSE_MEMORY_KEY) || '{}');
+    m[fourCC] = Date.now();
+    localStorage.setItem(MSE_MEMORY_KEY, JSON.stringify(m));
+  } catch { /* private window: this page only */ }
 }
 
 // ─── Active-decoder counter ────────────────────────────────────────────
@@ -564,6 +595,12 @@ export class WebCodecsClient {
 
     // Rate-limit for fatal-decoder-error rebuilds (see _scheduleDecoderRebuild).
     this._decoderRebuildTimer = null;
+    // The <video> fallback (msePlayer.js): frames a VideoDecoder has output,
+    // decoders that died before any, and the player once switched.
+    this._decoderOutputs = 0;
+    this._failedDecoders = 0;
+    this._mse = null;
+    this._mseRetryTimer = null;
 
     // Decoders
     this._videoDecoder      = null;
@@ -803,7 +840,7 @@ export class WebCodecsClient {
       }
       // Decoder was closed while we were hidden — rebuild it from the
       // cached config and wait for the next keyframe before resuming.
-      if (!this._videoDecoder && this._videoCodecRecord) {
+      if (!this._videoDecoder && !this._mse && this._videoCodecRecord) {
         if (this._createVideoDecoder()) this._waitingForKeyframe = true;
       }
       return;
@@ -961,6 +998,7 @@ export class WebCodecsClient {
       pausedDrops: st.pausedDrops || 0,
       rebuilds: st.decoderRebuilds || 0,
       software: !!st.softwareFallback,
+      mse: !!this._mse,
       visible: this._paneVisible && this._tabVisible,
       rttMs: this._pings.length ? Math.round(Math.min(...this._pings.map((p) => p.rtt))) : null,
       arrival: spread(this._arrivalLags),
@@ -1033,16 +1071,24 @@ export class WebCodecsClient {
     const sameRecord = !!this._videoCodecRecord
       && this._videoCodecRecord.length === record.length
       && record.every((b, i) => b === this._videoCodecRecord[i]);
-    if (sameCodec && sameRecord && this._videoDecoder?.state === 'configured') {
+    if (sameCodec && sameRecord && (this._mse || this._videoDecoder?.state === 'configured')) {
       return;  // Identical config — no need to rebuild.
     }
     this._videoCodecString = codec;
+    this._videoFourCC = fourCC;
     // Cache a copy of the description bytes so we can rebuild the decoder
     // later (e.g. after an off-screen idle close) without needing the
     // server to re-send a VIDEO_CONFIG.  Slice into a fresh Uint8Array
     // because the incoming `record` is a view into the WebSocket message
     // buffer, which becomes invalid after this handler returns.
     this._videoCodecRecord = record.slice();
+
+    if (useMseFor(fourCC, codec)) {
+      this._startMse();
+      this._status('streaming');
+      return;
+    }
+    if (this._mse) this._stopMse();
 
     // Settle hardware vs software before the first configure.  Chunks that
     // arrive meanwhile (the catch-up GOP, usually) are held and replayed.
@@ -1089,7 +1135,7 @@ export class WebCodecsClient {
     // failure drops this client to 'no-preference' (software allowed).
     const hwAccel = this._hwAccel || 'prefer-hardware';
     const decoder = new VideoDecoder({
-      output: (frame) => this._onVideoFrame(frame),
+      output: (frame) => { this._decoderOutputs++; this._onVideoFrame(frame); },
       // WebCodecs error callbacks are fatal — the decoder is dead after
       // one fires.  Without a rebuild the chunk handler silently drops
       // every subsequent chunk (state guard) and the pane freezes forever
@@ -1097,9 +1143,17 @@ export class WebCodecsClient {
       // (hardware decoder evicted / driver reset), so recovery matters
       // most on exactly the machines that hit it.
       error: (err) => {
-        if (hwAccel === 'prefer-hardware' && /unsupported configuration|not supported/i.test(err?.message || '')) {
+        const unsupported = /unsupported configuration|not supported/i.test(err?.message || '');
+        if (hwAccel === 'prefer-hardware' && unsupported) {
           this._hwAccel = 'no-preference';
           this._stats.softwareFallback = true;
+        } else if (!this._decoderOutputs && (unsupported || ++this._failedDecoders >= 2)
+            && this._videoCodecString && mseSupports(this._videoCodecString)) {
+          // Never produced a picture here, and <video> can play this codec.
+          this._onError(err);
+          rememberMse(this._videoFourCC);
+          this._startMse();
+          return;
         } else {
           this._onError(err);
         }
@@ -1140,7 +1194,7 @@ export class WebCodecsClient {
     const delay = this._stats.softwareFallback && !this._stats.decoderRebuilds ? 0 : 1_000;
     this._decoderRebuildTimer = setTimeout(() => {
       this._decoderRebuildTimer = null;
-      if (this._stopped || this._videoDecoder) return;
+      if (this._stopped || this._videoDecoder || this._mse) return;
       if (this._decodingPaused()) return;  // _syncVisibility rebuilds on return
       if (this._videoCodecRecord && this._createVideoDecoder()) {
         this._waitingForKeyframe = true;
@@ -1164,6 +1218,17 @@ export class WebCodecsClient {
     if (!replayed && this._clockOffsetMs !== null && !(view.getUint8(2) & FLAG_CATCHUP)
         && this._arrivalLags.length < 3000) {
       this._arrivalLags.push(performance.now() - this._clockOffsetMs - readBigInt64LE(view, 3) / 1000);
+    }
+    if (this._mse) {
+      // Off-screen or hidden: drop until the next keyframe, as below.
+      if (this._decodingPaused()) {
+        this._mse.needKeyframe();
+        this._stats.pausedDrops = (this._stats.pausedDrops || 0) + 1;
+        return;
+      }
+      this._mse.push(readBigInt64LE(view, 3), (view.getUint8(2) & FLAG_KEYFRAME) !== 0,
+        new Uint8Array(view.buffer, view.byteOffset + 11, view.byteLength - 11));
+      return;
     }
     if (!this._videoDecoder || this._videoDecoder.state !== 'configured') return;
     const flags = view.getUint8(2);
@@ -1453,6 +1518,57 @@ export class WebCodecsClient {
     this._status('error', msg);
   }
 
+  // ── <video> fallback ───────────────────────────────────────────────
+
+  /** Swap the VideoDecoder for a hidden <video> fed over MSE (msePlayer.js). */
+  _startMse() {
+    if (this._videoDecoder) {
+      _decrementActiveDecoderCount();
+      try { this._videoDecoder.close(); } catch { /* closed by its error */ }
+      this._videoDecoder = null;
+    }
+    clearTimeout(this._decoderRebuildTimer);
+    this._decoderRebuildTimer = null;
+    for (const f of this._videoQueue) f.close();
+    this._videoQueue = [];
+    this._stopMse();
+    this._stats.mse = true;
+    this._mse = new MsePlayer({
+      fourCC: this._videoFourCC,
+      codec:  this._videoCodecString,
+      record: this._videoCodecRecord,
+      onFrame: (frame) => this._drawMseFrame(frame),
+      // A dead <video> is rebuilt from the cached config, at most every 2 s.
+      onError: (err) => {
+        this._onError(err);
+        if (this._mseRetryTimer) return;
+        this._mseRetryTimer = setTimeout(() => {
+          this._mseRetryTimer = null;
+          if (this._mse && !this._stopped && this._videoCodecRecord) this._startMse();
+        }, 2000);
+      },
+    });
+  }
+
+  _stopMse() {
+    clearTimeout(this._mseRetryTimer);
+    this._mseRetryTimer = null;
+    if (this._mse) { this._mse.destroy(); this._mse = null; }
+  }
+
+  /** The <video> already plays at the live edge, so its frames are drawn as they come. */
+  _drawMseFrame(frame) {
+    if (this._clockOffsetMs !== null && this._renderLags.length < 3000) {
+      this._renderLags.push(performance.now() - this._clockOffsetMs - frame.timestamp / 1000);
+    }
+    this._renderer.drawFrame(frame);
+    this._stats.framesRendered++;
+    if (!this._firstFrameSent) {
+      this._firstFrameSent = true;
+      try { this._onFirstFrame(); } catch { /* host callback errors are theirs */ }
+    }
+  }
+
   // ── Decoder outputs ────────────────────────────────────────────────
 
   _onVideoFrame(frame) {
@@ -1578,6 +1694,7 @@ export class WebCodecsClient {
       this._videoDecoder = null;
     }
     if (this._audioDecoder) { try { this._audioDecoder.close(); } catch {} this._audioDecoder = null; }
+    this._stopMse();
     // Cached codec config is invalidated alongside the decoder — the server
     // will resend VIDEO_CONFIG after the stream-reset that triggered this.
     // Until then the cached bytes describe an encoding that's about to

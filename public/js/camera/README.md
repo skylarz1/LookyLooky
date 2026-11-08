@@ -4,6 +4,7 @@
 |---|---|
 | `viewer.js` | `CameraGrid`, `CameraPane`: layouts, the full-motion budget, tier switching, zoom, stream quality |
 | `webcodecsClient.js` | WebSocket + WebCodecs decode, the playout clock, audio |
+| `msePlayer.js` | `<video>` fallback over MSE, for browsers whose WebCodecs fails on a codec `<video>` plays |
 | `audioWorkletProcessor.js` | Off-main-thread PCM FIFO for audio output |
 
 The server side of the wire protocol is `server/protocol.js`. Keep the two in
