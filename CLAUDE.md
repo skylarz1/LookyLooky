@@ -44,7 +44,8 @@ server/sources.js         FFmpeg input args per URL type (incl. RTSP multicast +
 server/onvif.js           ONVIF discovery (stream URIs, multicast URIs and groups) and lookupMulticast for existing cameras
 server/recordings.js  scan.js  probe.js  tls.js (local CA)  legacy-proxy.js (camera-proxy endpoints)
 public/js/camera/         viewer.js (CameraGrid/CameraPane: tiers, budget, zoom, quality, per-pane audio),
-                          webcodecsClient.js, audioWorkletProcessor.js — see public/js/camera/README.md
+                          webcodecsClient.js, msePlayer.js (<video> fallback), audioWorkletProcessor.js
+                          — see public/js/camera/README.md
 public/js/widgets/camera-wall.js   the wall widget (story mode via noodleman, or fixed layout)
 public/js/noodleman.js    message bus (+ postMessage / BroadcastChannel bridges)
 public/js/compat.js       Fullscreen shim (iPad prefixed, iPhone emulated), capability detection, HTTPS redirect, banner
@@ -93,6 +94,12 @@ test/network.js           unreachable cameras: the TCP knock, STREAM_PROBLEM, wa
   treats it as *required*; without the probe, PCs with no hardware decoder
   fail every configure. Chunks are held during the probe so the first
   keyframe isn't lost.
+- **A probe that says yes can still be wrong** (a Windows 10 Chrome: every
+  H.265 decode failed). Two dead decoders with no output, and the client
+  switches to `msePlayer.js`: one-sample fMP4 fragments (µs timescale, so
+  `tfdt` = PTS) into a hidden `<video>`, frames drawn on the pane's canvas,
+  so covers and stats don't change. Remembered per fourCC in localStorage for
+  a day; `?decoder=mse|webcodecs` forces it.
 - **`CameraGrid.destroyAll()` keeps the grid's listeners; `destroy()`
   removes them.** The dashboard reuses the grid after `destroyAll()` on every
   layout switch.

@@ -34,6 +34,7 @@ function cleanReport(msg) {
   const out = { at: Date.now() };
   for (const k of ['fps', 'dropped', 'decodeQueue', 'videoQueue', 'reanchors', 'inputShed', 'pausedDrops', 'rebuilds', 'rttMs']) out[k] = num(msg[k]);
   out.software = msg.software === true;
+  out.mse = msg.mse === true;
   out.visible = msg.visible !== false;
   out.arrival = spread(msg.arrival);
   out.render = spread(msg.render);
