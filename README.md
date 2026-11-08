@@ -205,6 +205,8 @@ already has a trusted certificate. On the machine running Docker,
   on the page follows, and the browser remembers it for a day. It costs about
   0.1 s of extra delay. `/stats` shows *<video> fallback* in the viewer's
   notes. `?decoder=mse` or `?decoder=webcodecs` in a page URL forces one.
+  When a pane stays black, its notes also show the decoder's last error, and
+  say so when the browser's `<video>` can't play the codec either.
 - **iPhone:** it has no element fullscreen, so fullscreen is emulated.
 
 ## Configuration

@@ -68,7 +68,7 @@ function parseProblem(view) {
     text:  new TextDecoder().decode(new Uint8Array(view.buffer, view.byteOffset + 7, view.byteLength - 7)),
   };
 }
-import { MsePlayer, mseSupports } from './msePlayer.js';
+import { MsePlayer, mseSupports, mseCodecFor } from './msePlayer.js';
 
 const FLAG_KEYFRAME    = 0x01;
 const FLAG_CATCHUP     = 0x02;
@@ -596,9 +596,12 @@ export class WebCodecsClient {
     // Rate-limit for fatal-decoder-error rebuilds (see _scheduleDecoderRebuild).
     this._decoderRebuildTimer = null;
     // The <video> fallback (msePlayer.js): frames a VideoDecoder has output,
-    // decoders that died before any, and the player once switched.
+    // decoders that died before a frame was drawn, the last decoder error
+    // (reported, for PCs nobody can open a console on), and the player once
+    // switched.
     this._decoderOutputs = 0;
     this._failedDecoders = 0;
+    this._lastDecoderError = null;
     this._mse = null;
     this._mseRetryTimer = null;
 
@@ -999,6 +1002,10 @@ export class WebCodecsClient {
       rebuilds: st.decoderRebuilds || 0,
       software: !!st.softwareFallback,
       mse: !!this._mse,
+      codec: this._videoCodecString || null,
+      mseCodec: this._videoCodecString ? mseCodecFor(this._videoCodecString) : null,
+      decoderOutputs: this._decoderOutputs,
+      decoderError: this._lastDecoderError,
       visible: this._paneVisible && this._tabVisible,
       rttMs: this._pings.length ? Math.round(Math.min(...this._pings.map((p) => p.rtt))) : null,
       arrival: spread(this._arrivalLags),
@@ -1144,12 +1151,13 @@ export class WebCodecsClient {
       // most on exactly the machines that hit it.
       error: (err) => {
         const unsupported = /unsupported configuration|not supported/i.test(err?.message || '');
+        this._lastDecoderError = `${err?.name || 'Error'}: ${err?.message || ''}`.slice(0, 120);
         if (hwAccel === 'prefer-hardware' && unsupported) {
           this._hwAccel = 'no-preference';
           this._stats.softwareFallback = true;
-        } else if (!this._decoderOutputs && (unsupported || ++this._failedDecoders >= 2)
+        } else if (!this._stats.framesRendered && (unsupported || ++this._failedDecoders >= 2)
             && this._videoCodecString && mseSupports(this._videoCodecString)) {
-          // Never produced a picture here, and <video> can play this codec.
+          // Never drew a picture here, and <video> can play this codec.
           this._onError(err);
           rememberMse(this._videoFourCC);
           this._startMse();

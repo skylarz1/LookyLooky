@@ -93,11 +93,33 @@ function fragment(seq, pts, duration, isKey, data) {
 
 // ─── Support check ─────────────────────────────────────────────────────
 
-/** Whether this browser's <video> plays the codec through MSE. */
-export function mseSupports(codec) {
+function mseAccepts(codec) {
   try {
     return typeof MediaSource !== 'undefined' && MediaSource.isTypeSupported(`video/mp4; codecs="${codec}"`);
   } catch { return false; }
+}
+
+/**
+ * The codec string this browser's <video> accepts for the stream, or null.
+ * The server's HEVC strings are exact (e.g. 'hvc1.1.2.L153', no constraint
+ * bytes); some Chrome builds may only know the common 'hvc1.1.6.L153.B0'
+ * form. The picture comes from the hvcC record either way, so the
+ * SourceBuffer may be opened with the common form.
+ */
+export function mseCodecFor(codec) {
+  if (!codec) return null;
+  if (mseAccepts(codec)) return codec;
+  const m = /^(hvc1|hev1)\.[A-C]?\d+\.[0-9A-F]+\.([LH])(\d+)/i.exec(codec);
+  if (!m) return null;
+  for (const alt of [`hvc1.1.6.${m[2]}${m[3]}.B0`, `hvc1.1.6.L${m[3]}.B0`, 'hvc1.1.6.L153.B0']) {
+    if (mseAccepts(alt)) return alt;
+  }
+  return null;
+}
+
+/** Whether this browser's <video> plays the codec through MSE. */
+export function mseSupports(codec) {
+  return mseCodecFor(codec) !== null;
 }
 
 // ─── Player ────────────────────────────────────────────────────────────
@@ -115,7 +137,7 @@ export class MsePlayer {
     this._onFrame = onFrame;
     this._onError = onError;
     this._init = initSegment(fourCC, record, 1920, 1080);
-    this._codec = codec;
+    this._codec = mseCodecFor(codec) || codec;
     this._queue = [];          // ArrayBuffers waiting for the SourceBuffer
     this._held = null;         // newest access unit, appended once the next one gives its duration
     this._needKey = true;
@@ -140,7 +162,7 @@ export class MsePlayer {
     this._ms.addEventListener('sourceopen', () => {
       if (this._closed) return;
       try {
-        this._sb = this._ms.addSourceBuffer(`video/mp4; codecs="${codec}"`);
+        this._sb = this._ms.addSourceBuffer(`video/mp4; codecs="${this._codec}"`);
         this._sb.mode = 'segments';
         this._sb.addEventListener('updateend', () => this._pump());
         this._queue.unshift(this._init);
