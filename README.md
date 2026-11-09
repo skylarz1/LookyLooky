@@ -310,10 +310,19 @@ LookyLooky copes with that by itself:
   unicast make-before-break, so viewers see no gap. Multicast is UDP, and a
   lost packet smears the picture until the next keyframe. On 2026-11-07 the
   Uniview groups (cam-30 to cam-34) lost packets on the way to the server
-  while every Dahua group arrived whole. `/stats` counts the gaps.
+  while every Dahua group arrived whole. `/stats` counts the gaps. On
+  2026-11-09 a capture at the server's network card showed the same gaps,
+  with no drops in the server's own receive buffers: the packets are lost
+  before they reach the server.
+- **Frames are held after a lost packet:** the frame a lost packet belonged
+  to, and every frame up to the next whole keyframe, are not sent to viewers.
+  The picture freezes for a second or two instead of turning green and
+  smearing. This applies to any RTP over UDP, multicast or not.
+  `ffmpeg.holdOnLoss: false` in the settings turns it off (it applies at
+  once, no restart).
 - **Stay on multicast when packets are lost** (a checkbox under Multicast
   in the camera's settings): the stream keeps multicast through lost packets
-  and stalls, and lives with the occasional smeared frame. It's for cameras
+  and stalls, and freezes briefly at each loss. It's for cameras
   that cope badly with extra unicast streams, such as the Temple cameras,
   where each fallback adds one more. A stream that gets no picture at all
   over multicast still falls back.

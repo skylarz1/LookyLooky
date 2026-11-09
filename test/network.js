@@ -106,12 +106,51 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       m.log = () => {};
       let recycled = 0; m._recycle = () => { recycled++; };
       const p = { multicast: true }; m.active = p;
-      m._onMulticastLoss(p, 2); m._onMulticastLoss(p, 2);
+      m._onRtpLoss(p, 2); m._onRtpLoss(p, 2);
       return { recycled, gaps: m.stats.rtpGaps, off: m.noMulticastUntil > Date.now() };
     };
     const plain = lossy(false), kept = lossy(true);
     check('multicast loss: 3 gaps in a minute → unicast', plain.recycled === 1 && plain.off, JSON.stringify(plain));
     check('multicast loss: keepMulticast stays on multicast, still counts the gaps', kept.recycled === 0 && !kept.off && kept.gaps === 4, JSON.stringify(kept));
+
+    // --- hold the picture after RTP loss ------------------------------------
+    // Which of a run of frames reach a viewer when a loss warning comes
+    // before frame `lossAt` ('K' keyframe, 'P' other, 66 ms apart; lower
+    // case arrives with the frame before it, in a burst); `hold` = the setting.
+    const held = (pattern, lossAt, hold = true) => {
+      const realNow = Date.now; let clock = realNow();
+      Date.now = () => clock;
+      try { return heldAt(pattern, lossAt, hold, (f) => { if (f === f.toUpperCase()) clock += 66; }); } finally { Date.now = realNow; }
+    };
+    const heldAt = (pattern, lossAt, hold, tick) => {
+      const c = { id: 'h', name: 'H', enabled: true, sources: [{ label: 'sub', type: 'rtsp', url: 'rtsp://192.0.2.9/x', transport: 'multicast', keepMulticast: true }] };
+      const st = { ...settings, ffmpeg: { ...settings.ffmpeg, holdOnLoss: hold } };
+      const m = new StreamSession({ ...fake, store: { settings: st }, camera: () => c }, 'h', 'sub');
+      m.log = () => {};
+      const p = { multicast: true }; m.active = p;
+      m.videoConfigMsg = Buffer.alloc(1); m.state = 'live';
+      const out = [];
+      m.clients.add({ configSent: true, sendVideo: (msg, isKey) => out.push(isKey ? 'K' : 'P') });
+      [...pattern].forEach((f, i) => {
+        if (lossAt.includes(i)) m._onRtpLoss(p, 1);
+        tick(f);
+        m._onVideoSample(p, i * 66666, f.toUpperCase() === 'K', Buffer.alloc(8), null);
+      });
+      clearInterval(m.watchdog);
+      return { out: out.join(''), stats: m.stats };
+    };
+    let h = held('KPPPPKPPP', [2]);
+    check('hold: frames after a loss are held to the next keyframe', h.out === 'KPKPPP' && h.stats.lossHolds === 1 && h.stats.lossHeld === 3, JSON.stringify(h));
+    h = held('KPPPPKPPPKPP', [5]);
+    check('hold: a keyframe right after the warning is held too (the loss was in it)', h.out === 'KPPPPKPP', h.out);
+    h = held('KPPPPpkpPPPKPP', [4]);
+    check('hold: a keyframe in the burst after the warning is held too', h.out === 'KPPPKPP', h.out);
+    h = held('KPPPPKPPPKPP', [2]);
+    check('hold: a keyframe arriving on its own after the burst ends the hold', h.out === 'KPKPPPKPP', h.out);
+    h = held('KPPPPKPPP', [2], false);
+    check('hold: holdOnLoss false passes everything, still counts the gap', h.out === 'KPPPPKPPP' && h.stats.rtpGaps === 1 && h.stats.lossHolds === 0, JSON.stringify(h));
+    h = held('KPPPKPPPKPP', [1, 6]);
+    check('hold: a second loss after the hold ends starts another', h.out === 'KKPKPP' && h.stats.lossHolds === 2, JSON.stringify(h));
     check('keepMulticast survives normaliseCamera', normaliseCamera({ id: 'k', name: 'K', sources: [{ url: 'rtsp://h/x', transport: 'multicast', keepMulticast: true }] }).sources[0].keepMulticast === true);
   } catch (err) {
     check('no exceptions', false, err.stack);
