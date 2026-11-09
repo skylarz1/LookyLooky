@@ -96,6 +96,16 @@ export function audioCapability() {
 
 // ─── Video renderer — 2D canvas implementation ─────────────────────────
 /**
+ * A desynchronized canvas skips the compositor to save about one display
+ * frame, and in exchange may show the top of one frame over the bottom of
+ * the last: tearing, worst on panning cameras.  Off by default; ?desync=1 on
+ * the page's URL turns it back on to compare.
+ */
+const DESYNC = (() => {
+  try { return new URLSearchParams(location.search).get('desync') === '1'; } catch { return false; }
+})();
+
+/**
  * Draws VideoFrames to a plain <canvas> via a 2D context.  Resizes the
  * canvas backing store to match the source frame on first frame / resolution
  * change.  CSS layout sizing is the caller's responsibility.
@@ -107,7 +117,7 @@ export function audioCapability() {
 export class CanvasVideoRenderer {
   constructor(canvas) {
     this._canvas = canvas;
-    this._ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+    this._ctx = canvas.getContext('2d', { alpha: false, desynchronized: DESYNC });
     this._lastW = 0;
     this._lastH = 0;
   }
@@ -330,7 +340,7 @@ export class ThumbnailClient {
     this._wsUrl    = wsUrl;
     this._cameraId = cameraId;
     this._canvas   = canvas;
-    this._ctx      = canvas.getContext('2d', { alpha: false, desynchronized: true });
+    this._ctx      = canvas.getContext('2d', { alpha: false, desynchronized: DESYNC });
     this._onStatus = onStatus || (() => {});
     // Same contract as WebCodecsClient's: fires once, on the first painted
     // frame.  A camera whose MJPEG process isn't running yet takes an FFmpeg

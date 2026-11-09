@@ -134,6 +134,10 @@ test/network.js           unreachable cameras: the TCP knock, STREAM_PROBLEM, wa
   - a source with `keepMulticast` ignores lost packets and stalls (not
     "no picture at all"): for cameras that struggle with more unicast
     streams (the Temple cameras);
+  - after any "RTP: missed" warning, frames are held back from the next one
+    FFmpeg puts out (even a keyframe) to the next keyframe
+    (`_onRtpLoss` / `_holdAfterLoss`, `ffmpeg.holdOnLoss`). FFmpeg prints
+    the warning before the damaged frame, so the order holds;
   - `transport: 'multicast'` falls back to TCP; with the global `prefer`, a
     `udp` source falls back to UDP;
   - `multicastUrl` is only for cameras whose multicast RTSP address

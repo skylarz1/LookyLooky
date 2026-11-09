@@ -153,10 +153,8 @@ class Pipeline extends EventEmitter {
     proc.stdio[2].on('data', (d) => {
       const text = d.toString();
       this.stderrTail = (this.stderrTail + text).slice(-4000);
-      if (this.multicast) {
-        const gaps = (text.match(/RTP: missed \d+ packets/g) || []).length;
-        if (gaps) s._onMulticastLoss(this, gaps);
-      }
+      const gaps = (text.match(/RTP: missed \d+ packets/g) || []).length;
+      if (gaps) s._onRtpLoss(this, gaps);
     });
     proc.on('error', (err) => { this.stderrTail += `\nspawn ${err.code || ''} ${err.message}`; });
     proc.on('close', (code, signal) => {
@@ -257,7 +255,7 @@ class StreamSession {
     this.idleTimer = null;
     this.lastVideoAt = 0;
     this.liveSince = 0;
-    this.stats = { bytesIn: 0, bytesOut: 0, frames: 0, skips: 0, kicks: 0, restarts: 0, recycles: 0, rtpGaps: 0 };
+    this.stats = { bytesIn: 0, bytesOut: 0, frames: 0, skips: 0, kicks: 0, restarts: 0, recycles: 0, rtpGaps: 0, lossHolds: 0, lossHeld: 0 };
     this.multicastLoss = [];        // times of recent RTP gaps while on multicast (_onMulticastLoss)
     this._bpsSample = { at: Date.now(), bytes: 0, inBytes: 0, frames: 0, bps: 0, inBps: 0, fps: 0 };
     this.ptsLagMs = null;
@@ -616,17 +614,57 @@ class StreamSession {
   }
 
   /**
+   * RTP over UDP (multicast, or RTSP set to UDP) lost packets on the way.
+   * FFmpeg only warns and passes the damaged frame on, and with the video
+   * copied the browser decodes it: green blocks and smears that every later
+   * frame builds on until the next keyframe.  So, unless settings.ffmpeg.
+   * holdOnLoss is false, this pipeline's frames are held back from the next
+   * one FFmpeg puts out to the next keyframe that wasn't itself damaged
+   * (_holdAfterLoss): viewers see the last good picture freeze instead.
+   * FFmpeg prints the warning before it puts out the frame the packet
+   * belonged to, so no damaged frame slips through ahead of it.
+   */
+  _onRtpLoss(p, gaps) {
+    this.stats.rtpGaps += gaps;
+    if (this.manager.store.settings.ffmpeg.holdOnLoss !== false) {
+      if (!p.lossHold) { p.lossHold = Date.now(); this.stats.lossHolds++; }
+      p.lossFresh = true;
+    }
+    if (p.multicast) this._onMulticastLoss(p, gaps);
+  }
+
+  /**
+   * Whether a sample of `p` is held back after a loss.  FFmpeg queues the
+   * packets behind a gap until it gives up on the missing one, then puts
+   * out every frame they make at once: the damaged frame is somewhere in
+   * that burst, and an older good one may come first (FFmpeg reads and
+   * writes in separate threads).  So a keyframe in the burst (frames less
+   * than 20 ms apart, starting with the first one after the warning) is
+   * held too; on cam-31 such keyframes came out 2-18 KB short.  A stream
+   * losing packets in every keyframe would never show a picture: after 5 s
+   * the hold gives up and the frames go out as they are.
+   */
+  _holdAfterLoss(p, isKey) {
+    const now = Date.now();
+    const burst = p.lossFresh || (p.lossBurst && now - p.lossLastAt < 20);
+    p.lossFresh = false;
+    p.lossBurst = burst;
+    p.lossLastAt = now;
+    if ((isKey && !burst) || now - p.lossHold > 5000) { p.lossHold = 0; return false; }
+    this.stats.lossHeld++;
+    return true;
+  }
+
+  /**
    * Multicast is plain UDP: a lost packet corrupts the picture until the
-   * next keyframe (green smears on H.265, which is seconds on a camera with a
-   * long keyframe interval).  Seen on the Uniview cameras, whose groups lose
-   * packets on the way while every Dahua group arrives whole.  A stream that
-   * loses packets three times in a minute moves to unicast TCP for a while,
-   * make-before-break, so viewers see no gap.  Not a source set to keep
-   * multicast (cameras that struggle with more unicast streams): it only
-   * counts the gaps, and keeps the occasional smeared frame.
+   * next keyframe (see _onRtpLoss).  Seen on the Uniview cameras, whose
+   * groups lose packets on the way while every Dahua group arrives whole.  A
+   * stream that loses packets three times in a minute moves to unicast TCP
+   * for a while, make-before-break, so viewers see no gap.  Not a source set
+   * to keep multicast (cameras that struggle with more unicast streams): it
+   * only counts the gaps, and the held frames hide them.
    */
   _onMulticastLoss(p, gaps) {
-    this.stats.rtpGaps += gaps;
     if (p !== this.active || this.pending || this.source.keepMulticast) return;
     const now = Date.now();
     this.multicastLoss = this.multicastLoss.filter((t) => now - t < 60000);
@@ -677,6 +715,11 @@ class StreamSession {
   }
 
   _onVideoSample(p, pts, isKey, data, frag) {
+    if (p.lossHold && this._holdAfterLoss(p, isKey)) {
+      // Still arriving, so not a stall for the watchdog.
+      if (p === this.active) this.lastVideoAt = Date.now();
+      return;
+    }
     if (p === this.pending) {
       if (!isKey || !p._pendingInit) return;
       // Take over: the old pipeline goes, the new one's keyframe starts a fresh GOP.

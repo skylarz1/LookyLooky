@@ -36,6 +36,9 @@ const DEFAULT_SETTINGS = {
     // 'multicast'; 'prefer' = every RTSP source tries multicast first.  Either
     // way a stream that gets no picture over multicast falls back to TCP.
     multicast: 'off',
+    // After RTP packets go missing, hold a stream's frames back until a clean
+    // keyframe: a short freeze instead of green smears (stream-session.js).
+    holdOnLoss: true,
   },
   webcodecs: {
     bufferMs: 150,
