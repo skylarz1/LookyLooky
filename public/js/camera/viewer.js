@@ -414,7 +414,24 @@ export class CameraPane {
       this._bindQuality(wrap, el);
       this._bindSpeaker(wrap);
       wrap.addEventListener('click',    ()  => this.onFocusRequest?.(this.cameraId));
-      wrap.addEventListener('dblclick', (e) => this.onDblClick?.(this.slotIndex, e));
+      // iOS Safari does not reliably send dblclick for a double tap, so two
+      // touch taps on the same pane within 350 ms count as one.  A dblclick
+      // that does arrive right after is the same gesture and is skipped.
+      wrap.addEventListener('click', (e) => {
+        if (this._lastPointer !== 'touch' && this._lastPointer !== 'pen') { this._lastTap = 0; return; }
+        const now = performance.now();
+        if (now - (this._lastTap || 0) < 350) {
+          this._lastTap = 0;
+          this._doubleTapAt = now;
+          this.onDblClick?.(this.slotIndex, e);
+        } else {
+          this._lastTap = now;
+        }
+      });
+      wrap.addEventListener('dblclick', (e) => {
+        if (performance.now() - (this._doubleTapAt || 0) < 600) return;
+        this.onDblClick?.(this.slotIndex, e);
+      });
     }
     el.addEventListener('dragstart', (e) => this.onDragStart?.(this.slotIndex, e));
     el.addEventListener('dragend',   (e) => this.onDragEnd?.(e));
@@ -1091,11 +1108,16 @@ export class CameraPane {
       else this.grid.setPaneQuality(this.cameraId, this.effectiveQuality === 'main' ? 'sub' : 'main');
     }, true);
     // Touch has no hover: a tap reveals the controls for a few seconds.
-    el.addEventListener('touchstart', () => {
+    // After the click, not on touchstart: iOS Safari treats controls that
+    // fade in during a tap as a hover menu and holds the click back, so the
+    // first tap on a pane only revealed them and the second one selected it.
+    el.addEventListener('pointerdown', (e) => { this._lastPointer = e.pointerType; }, true);
+    el.addEventListener('click', () => {
+      if (this._lastPointer !== 'touch' && this._lastPointer !== 'pen') return;
       el.classList.add('touch-reveal');
       clearTimeout(this._revealTimer);
       this._revealTimer = setTimeout(() => el.classList.remove('touch-reveal'), 3500);
-    }, { passive: true });
+    });
   }
 
   /** Refresh the HQ/LQ control to match what the pane is (or is becoming). */

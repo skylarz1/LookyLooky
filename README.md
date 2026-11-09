@@ -49,7 +49,7 @@ browsers can be checked before any real camera is added.
 | `/` | Landing page, with View and Wall links for every layout |
 | `/cameras.html[?layout=…&audio=…]` (`/dashboard`) | Dashboard: cameras, layouts, drag and drop, audio focus, fullscreen and keypad focus, recordings, network scan, ONVIF discovery, settings, recycle, import and export. The address bar follows the layout and the camera heard, so a copied link opens the same view |
 | `/camera-view.html?layout=<id or name>[&quality=high\|low][&audio=…]` | Read-only board for wall displays and kiosks. Silent unless `audio` is given |
-| `/wall.html?layout=<id or name>[&camera=<id>][&quality=high\|low][&audio=…]` | The camera wall: one 16:9 main pane over up to six previews (two across on an upright phone). Tap a preview to put it up; audio follows the main pane |
+| `/wall.html?layout=<id or name>[&camera=<id>][&quality=high\|low][&audio=…]` | The camera wall: one 16:9 main pane over up to six previews, three to a row, or up to twelve, four to a row (two or three across on an upright phone). Tap a preview to put it up; audio follows the main pane |
 | `/stats` | Statistics: server load, every stream and every viewer's delay (admin; see "Statistics and load testing") |
 | `/setup.html` | Browser capability check and certificate install steps |
 | `/camera-1.html?camera=<id>` | A single camera's raw stream drawn to a canvas (test page) |
@@ -70,6 +70,14 @@ then a **Tap for sound** button shows whenever something should be heard.
 On an upright phone the view board stacks its cameras at 16:9, two across
 with the large pane full width, and scrolls. The dashboard's header and
 toolbar wrap instead of widening the page.
+
+On an iPad (any window narrower than 1100 px, Split View and Stage Manager
+included) the dashboard keeps the layout's real grid. The header and toolbar
+are compact, and the camera list is a drawer that **☰** opens over the grid
+(a tap outside closes it). Only a phone (600 px or less) gets one camera per
+row. A tap on a pane selects it, puts it up in a featured layout, and shows
+its controls for a few seconds. A double tap goes fullscreen, like a
+double-click.
 
 ## Zoom
 

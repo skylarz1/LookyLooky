@@ -46,15 +46,25 @@ import { CameraGrid, webCodecsAvailable } from "../camera/viewer.js";
 export default class CameraWall extends Widget {
 
     /**
-     * The wall is the camera service's '7f' grid: one main pane over two rows
-     * of three. ShapeLayout() re-labels every layout as 7f, so if these change
-     * the grid type has to change with them.
+     * The wall is the camera service's '7f' grid: one main pane over rows of
+     * previews. ShapeLayout() re-labels every layout as 7f, and the wall's
+     * CameraGrid is given a 7f with room for every preview (see Start).
      *
-     * The main pane is not a seventh camera -- it is a view onto whichever of
-     * the six is selected.
+     * Up to six previews sit three to a row, as they always have. A room with
+     * more -- seven or eight cameras is common -- puts them four to a row
+     * instead of dropping the extras off the end, up to twelve.
+     *
+     * The main pane is not an extra camera -- it is a view onto whichever of
+     * the previews is selected.
      */
     static PANES_PER_ROW = 3;
-    static PREVIEW_PANES = 6;
+    static WIDE_PANES_PER_ROW = 4;
+    static PREVIEW_PANES = 12;
+
+    /** Previews per row: three for up to six, four past that. */
+    static PerRow(previews) {
+        return previews <= 2 * CameraWall.PANES_PER_ROW ? CameraWall.PANES_PER_ROW : CameraWall.WIDE_PANES_PER_ROW;
+    }
 
     /* The camera dashboard's own speaker glyphs, so the control reads the same
        on both. Crossed out when muted, waves when not. */
@@ -377,7 +387,13 @@ export default class CameraWall extends Widget {
             qualityPolicy: this.qualityPolicy || "sub",
             mainMinWidth: this.mainMinWidth || 1280,
 
-            interactive: false
+            interactive: false,
+
+            // 7f with a slot for every preview: CameraGrid builds only
+            // def.slots panes, and the stock 7f stops at six previews.
+            layoutDefs: Object.assign({}, CameraGrid.defaultLayoutDefs(), {
+                "7f": { cols: 3, rows: 4, slots: 1 + CameraWall.PREVIEW_PANES, featured: 0 },
+            }),
         });
 
         if (this.fullMotion === false && window.LookyCompat != null && !this._bannered) {
@@ -440,7 +456,7 @@ export default class CameraWall extends Widget {
      * order, so leaving the holes would drop real cameras off the end.
      */
     /**
-     * The six cameras of this layout, in slot order.
+     * The cameras of this layout, in slot order, up to PREVIEW_PANES.
      *
      * Ids, not panes. The camera service's layout can have gaps -- slot 0
      * empty, slot 4 assigned -- so this reads slots in numeric order and takes
@@ -691,12 +707,21 @@ export default class CameraWall extends Widget {
         if (wall == null) return;
 
         const previews = this.previewCount || 0;
+        const perRow = CameraWall.PerRow(previews);
 
-        const rows = previews <= 1 ? 0
-                   : previews <= CameraWall.PANES_PER_ROW ? 1
-                   : 2;
+        const rows = previews <= 1 ? 0 : Math.ceil(previews / perRow);
+
+        // An upright phone or tablet: two across for up to six, three past that.
+        const perRowNarrow = perRow - 1;
+        // Same fixed grid as the wide one, re-flowed: a pane keeps its size
+        // whether the room fills every slot or not.
+        const rowsNarrow = Math.ceil(rows * perRow / perRowNarrow);
 
         wall.setAttribute("data-rows", String(rows));
+        wall.style.setProperty("--wall-cols", String(perRow));
+        wall.style.setProperty("--wall-rows", String(rows));
+        wall.style.setProperty("--wall-cols2", String(perRowNarrow));
+        wall.style.setProperty("--wall-rows2", String(rowsNarrow));
     }
 
     /**
@@ -842,7 +867,7 @@ export default class CameraWall extends Widget {
         if (cameraID == null) return;
 
         // Up and showing this story's layout: move the pane now. Select ignores
-        // a camera the wall has no pane for -- one past the six previews, or one
+        // a camera the wall has no pane for -- one past the twelve previews, or one
         // the layout has since lost.
         const ready = this.grid != null && !this.building
                    && String(value.StoryID) === String(this.storyID)

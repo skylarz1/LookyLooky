@@ -591,7 +591,8 @@
 
    camera-wall.js re-labels every layout as the camera service's '7f' grid
    type, so this is the only arrangement the wall ever takes: one main pane
-   across the top, up to six below it in two rows of three.
+   across the top, up to six below it in rows of three, or up to twelve in
+   rows of four.
 
    The service's own 7f rule (above) gives the main pane the top *half* -- rows
    1-2 of four equal rows, whatever shape that turns out to be. Here it gets a
@@ -650,9 +651,13 @@
    --wall-width is NOT declared here. It is built from cqw/cqh, and container
    query units inside a rule targeting the container itself resolve against the
    next container out, not this one. The children compute it. */
+/* camera-wall.js also sets --wall-cols / --wall-rows (and the upright
+   --wall-cols2 / --wall-rows2) inline: three previews to a row for up to six,
+   four to a row for seven to twelve. Each row of n is width x 9/16 x 1/n. */
 .claudifer-wall {
+    --wall-cols: 3;
     --wall-rows: 2;
-    --wall-ratio: calc(0.5625 + 0.1875 * var(--wall-rows));
+    --wall-ratio: calc(0.5625 + 0.5625 * var(--wall-rows) / var(--wall-cols));
 }
 
 .claudifer-wall[data-rows="0"] { --wall-rows: 0; }
@@ -681,15 +686,12 @@
        wall with fewer cameras leaves gaps; it does not resize the ones that
        are there, which would make the picture jump every time a camera on the
        service went away and came back. */
-    grid-template-rows: auto minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-columns: repeat(var(--wall-cols), minmax(0, 1fr));
+    grid-template-rows: auto repeat(var(--wall-rows), minmax(0, 1fr));
 }
 
 .claudifer-wall[data-rows="0"] > .grid.layout-7f {
     grid-template-rows: auto;
-}
-
-.claudifer-wall[data-rows="1"] > .grid.layout-7f {
-    grid-template-rows: auto minmax(0, 1fr);
 }
 
 /* A phone held upright (the wall's box narrower than 2:3). Rows of three
@@ -697,13 +699,13 @@
    the previews go two across instead: three rows for a full wall, two for a
    room with up to three previews. Each row of two is width x 9/16 x 1/2, and
    the wall's ratio grows by that per row, so the main pane stays 16:9. */
-.claudifer-wall { --wall-rows2: 3; }
+.claudifer-wall { --wall-cols2: 2; --wall-rows2: 3; }
 .claudifer-wall[data-rows="1"] { --wall-rows2: 2; }
 
 @container (max-aspect-ratio: 2 / 3) {
     .claudifer-wall:not([data-rows="0"]) > .grid.layout-7f {
-        --wall-ratio: calc(0.5625 + 0.28125 * var(--wall-rows2));
-        grid-template-columns: repeat(2, minmax(0, 1fr));
+        --wall-ratio: calc(0.5625 + 0.5625 * var(--wall-rows2) / var(--wall-cols2));
+        grid-template-columns: repeat(var(--wall-cols2), minmax(0, 1fr));
         grid-template-rows: auto repeat(var(--wall-rows2), minmax(0, 1fr));
     }
 }
@@ -889,9 +891,21 @@
   position: absolute; right: 8px; bottom: 36px; z-index: 4; display: flex; gap: 3px;
   opacity: 0; pointer-events: none; transition: opacity 0.15s;
 }
-.claudifer-wall .camera-card:hover .quality-ctl,
 .claudifer-wall .camera-card.name-hover .quality-ctl,
 .claudifer-wall .camera-card.touch-reveal .quality-ctl { opacity: 1; pointer-events: auto; }
+/* :hover only where there is a real hover.  On iOS a tap sets :hover, and
+   controls fading in during a tap make Safari hold the click back. */
+@media (hover: hover) {
+  .claudifer-wall .camera-card:hover .quality-ctl,
+  .claudifer-wall .camera-card:hover .speaker-btn { opacity: 1; pointer-events: auto; }
+}
+/* After a tap (touch has no hover), the pane's own controls and name too. */
+.claudifer-wall .camera-card.touch-reveal .hover-controls { opacity: 1; pointer-events: auto; }
+.claudifer-wall .camera-card.touch-reveal .name-overlay {
+  opacity: 1;
+  background: linear-gradient(transparent, rgba(0,0,0,0.75));
+  text-shadow: 0 1px 4px rgba(0,0,0,0.9), 0 0 8px rgba(0,0,0,0.6);
+}
 .claudifer-wall .camera-card .quality-ctl button {
   background: rgba(0,0,0,0.65); color: #fff; border: 1px solid rgba(255,255,255,0.3);
   border-radius: 4px; font-size: 11px; font-weight: 700; padding: 3px 7px; cursor: pointer;
@@ -913,7 +927,6 @@
   opacity: 0; pointer-events: none; transition: opacity 0.15s;
 }
 .claudifer-wall .camera-card .speaker-btn svg { width: 16px; height: 16px; }
-.claudifer-wall .camera-card:hover .speaker-btn,
 .claudifer-wall .camera-card.name-hover .speaker-btn,
 .claudifer-wall .camera-card.touch-reveal .speaker-btn,
 .claudifer-wall .camera-card .speaker-btn.on { opacity: 1; pointer-events: auto; }

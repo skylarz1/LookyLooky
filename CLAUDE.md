@@ -111,6 +111,13 @@ test/network.js           unreachable cameras: the TCP knock, STREAM_PROBLEM, wa
   mu-law. Don't gate the video tier on `AudioDecoder`.
 - **The audio unlock listens to `touchend`/`pointerup`.** iOS does not count
   `touchstart` as activation.
+- **Nothing may fade in during a tap on iOS.** Safari treats controls that
+  become visible in response to a tap (a `:hover` rule, a mousemove handler,
+  a class added on `touchstart`) as a hover menu and holds the click back, so
+  the tap does nothing. `:hover` reveals sit in `@media (hover: hover)`, the
+  dashboard's name hover listens to mouse `pointermove` only, and touch
+  reveals (`.touch-reveal`) are added after the click. iOS also doesn't
+  reliably send `dblclick`: CameraPane counts two touch taps within 350 ms.
 - **RTSP over UDP falls back to TCP automatically.** Bridged networks can
   block the UDP return path, and host networking isn't an option on
   Windows. (On the owner's Docker Desktop, Lobby1 did play over UDP; keep the

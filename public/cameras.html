@@ -651,38 +651,55 @@
       letter-spacing: 4px;
     }
 
-    @media (max-width: 768px) {
+    /* Phones only: one camera per row, and the page scrolls.  This used to
+       start at 768 px, which caught an iPad in Split View or a Stage Manager
+       window (700-768 px) — the layout's grid collapsed to one tall column
+       and three cameras filled the screen until the page was zoomed to 90%. */
+    @media (max-width: 600px) {
       body { height: auto; overflow: auto; flex-direction: column; }
       .app-container { flex-direction: column; }
-      .sidebar-wrapper { width: 100% !important; max-width: none; height: 160px; }
-      .camera-sidebar { flex-direction: row; flex-wrap: wrap; padding: 4px; }
-      .sidebar-resizer { display: none; }
       .grid {
         --grid-cols: 1 !important;
         --grid-rows: auto !important;
         grid-template-rows: auto !important;
         height: auto !important;
       }
+      /* A featured layout's large pane spans several columns; in one column
+         that span added empty tracks down the right-hand side. */
+      .grid > .camera-card { grid-column: auto !important; grid-row: auto !important; }
       .camera-card .video-wrap { aspect-ratio: 16 / 9; flex: none; }
-
-      .layout-selector { flex: 1 1 auto; min-width: 0; }
-      .layout-selector select { min-width: 0; flex: 1 1 auto; }
-      /* Fourteen layout buttons: one row that scrolls sideways. */
-      .view-modes { width: 100%; overflow-x: auto; flex-wrap: nowrap; padding-bottom: 2px; }
-      .view-modes button { flex: 0 0 36px; height: 36px; }
-      .sidebar-wrapper { height: auto; max-height: 30vh; }
       /* Empty slots are drag-and-drop targets, which touch screens don't do. */
       .grid .placeholder-card { display: none; }
     }
     /* Phones and tablets: the header and toolbar wrap instead of widening
        the page (unwrapped they need 1086 px, so a phone or an upright iPad
-       zoomed the whole dashboard out to fit). */
+       zoomed the whole dashboard out to fit), and everything above the grid
+       is kept as short as it can be — on an iPad it took 470 px. */
     @media (max-width: 1100px) {
-      header { flex-wrap: wrap; gap: 6px; padding: 6px 10px; }
-      .header-actions { flex-wrap: wrap; gap: 6px; }
-      .header-actions .btn { padding: 6px 10px; }
-      .toolbar { flex-wrap: wrap; gap: 8px; padding: 8px 10px; }
+      header { flex-wrap: wrap; gap: 4px 6px; padding: 4px 10px; }
+      header h1 { font-size: 16px; }
+      .header-actions { flex-wrap: wrap; gap: 4px; }
+      .header-actions .btn { padding: 4px 9px; font-size: 12px; }
+      .toolbar { flex-wrap: wrap; justify-content: flex-start; gap: 6px; padding: 6px 10px; }
       .toolbar > div[style*="flex:1"] { display: none; }
+      .toolbar select { height: 30px !important; }
+      .layout-selector { flex: 0 1 auto; min-width: 0; }
+      .layout-selector select { min-width: 0; flex: 1 1 auto; }
+      /* Fourteen layout buttons: one row that scrolls sideways. */
+      .view-modes { flex: 1 1 260px; min-width: 0; overflow-x: auto; flex-wrap: nowrap; padding-bottom: 2px; }
+      .view-modes button { flex: 0 0 34px; height: 32px; }
+
+      /* The camera list is a drawer over the grid, closed until ☰ opens it
+         (toggleSidebar), instead of a column or a block that pushes the
+         cameras down. */
+      .sidebar-wrapper {
+        position: fixed; top: 0; bottom: 0; left: 0; z-index: 200;
+        width: min(280px, 85vw) !important; max-width: none;
+        box-shadow: 4px 0 24px rgba(0,0,0,0.6);
+        transition: none;
+      }
+      .sidebar-wrapper.collapsed { display: none; }
+      .sidebar-resizer { display: none; }
     }
     @media (max-width: 480px) {
       #throughputIndicator { display: none !important; }
@@ -2110,8 +2127,19 @@
         if (btn) btn.classList.add('active');
         renderSidebar();
       }
-      savePrefs({ sidebarCollapsed, sidebarWidth });
+      // A narrow screen's drawer opens and closes all the time; only the
+      // desktop column's state is worth remembering.
+      if (!_narrowSidebar.matches) savePrefs({ sidebarCollapsed, sidebarWidth });
     }
+
+    // At ≤1100 px the camera list is a drawer over the grid (see the CSS).
+    // It starts closed, and a tap anywhere outside it closes it again.
+    const _narrowSidebar = window.matchMedia('(max-width: 1100px)');
+    document.addEventListener('pointerdown', (e) => {
+      if (!_narrowSidebar.matches || sidebarCollapsed) return;
+      if (e.target.closest('#sidebarWrapper, #sidebarToggleBtn, .modal-overlay, .modal')) return;
+      toggleSidebar();
+    });
 
     function initSidebarResizer() {
       const resizer = document.getElementById('sidebarResizer');
@@ -4003,6 +4031,7 @@
 
       // Sidebar
       if (typeof p.sidebarCollapsed === 'boolean') sidebarCollapsed = p.sidebarCollapsed;
+      if (_narrowSidebar.matches) sidebarCollapsed = true;   // the drawer starts closed
       if (typeof p.sidebarWidth === 'number') sidebarWidth = p.sidebarWidth;
       if (p.sidebarMode === 'group' || p.sidebarMode === 'layout') sidebarMode = p.sidebarMode;
       const wrapper = document.getElementById('sidebarWrapper');
@@ -4265,7 +4294,12 @@
       };
 
       const _grid = document.getElementById('cameraGrid');
-      _grid.addEventListener('mousemove', (e) => {
+      // A real mouse only.  iOS Safari sends a mousemove with every tap, and a
+      // tap that makes controls fade in counts there as a hover: the click is
+      // held back and the tap does nothing.  Touch reveals controls after the
+      // click instead (CameraPane._bindQuality).
+      _grid.addEventListener('pointermove', (e) => {
+        if (e.pointerType !== 'mouse') return;
         const card = e.target.closest('.camera-card');
         if (card) _nameHoverShow(card);
       });
