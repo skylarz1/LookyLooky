@@ -447,9 +447,21 @@
   position: absolute; right: 8px; bottom: 36px; z-index: 4; display: flex; gap: 3px;
   opacity: 0; pointer-events: none; transition: opacity 0.15s;
 }
-.camera-card:hover .quality-ctl,
 .camera-card.name-hover .quality-ctl,
 .camera-card.touch-reveal .quality-ctl { opacity: 1; pointer-events: auto; }
+/* :hover only where there is a real hover.  On iOS a tap sets :hover, and
+   controls fading in during a tap make Safari hold the click back. */
+@media (hover: hover) {
+  .camera-card:hover .quality-ctl,
+  .camera-card:hover .speaker-btn { opacity: 1; pointer-events: auto; }
+}
+/* After a tap (touch has no hover), the pane's own controls and name too. */
+.camera-card.touch-reveal .hover-controls { opacity: 1; pointer-events: auto; }
+.camera-card.touch-reveal .name-overlay {
+  opacity: 1;
+  background: linear-gradient(transparent, rgba(0,0,0,0.75));
+  text-shadow: 0 1px 4px rgba(0,0,0,0.9), 0 0 8px rgba(0,0,0,0.6);
+}
 .camera-card .quality-ctl button {
   background: rgba(0,0,0,0.65); color: #fff; border: 1px solid rgba(255,255,255,0.3);
   border-radius: 4px; font-size: 11px; font-weight: 700; padding: 3px 7px; cursor: pointer;
@@ -471,7 +483,6 @@
   opacity: 0; pointer-events: none; transition: opacity 0.15s;
 }
 .camera-card .speaker-btn svg { width: 16px; height: 16px; }
-.camera-card:hover .speaker-btn,
 .camera-card.name-hover .speaker-btn,
 .camera-card.touch-reveal .speaker-btn,
 .camera-card .speaker-btn.on { opacity: 1; pointer-events: auto; }
