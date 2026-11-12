@@ -296,12 +296,14 @@ async function lookupMulticast(cam, { port = 80 } = {}) {
  * whose RTSP address is the stream's, else main = the largest and sub = the
  * smallest.  A camera that does not answer, rejects the login or has no such
  * profile is asked again after 30 s, then left alone for `retryMs`.  At most
- * one request per stream every `minMs`.
+ * one request per stream every `minMs`: a request inside that interval
+ * waits for its end (losses come in runs, and the keyframe asked for at the
+ * first one is often damaged by the next), any further one is dropped.
  */
 class KeyframeRequester {
   constructor({ minMs = 1000, retryMs = 10 * 60000, port = 80 } = {}) {
     this.minMs = minMs; this.retryMs = retryMs; this.port = port;
-    this.entries = new Map();   // "id/label" -> { url, client, token, lastAt, skipUntil, fails, busy, error }
+    this.entries = new Map();   // "id/label" -> { url, client, token, lastAt, skipUntil, fails, busy, later, error }
   }
 
   async _find(cam, src) {
@@ -325,20 +327,32 @@ class KeyframeRequester {
   }
 
   /**
-   * Ask `cam` for a keyframe on its source `src`.  Never throws.
+   * Ask `cam` for a keyframe on its source `src`.  Never throws.  A request
+   * that has to wait for the interval is dropped when its time comes if
+   * `needed()` says no (the picture is whole again, the viewers have left).
    * @returns {Promise<'sent'|'limited'|'unsupported'|'failed'>} 'failed' once per failure (see error()), 'unsupported' while the camera is left alone
    */
-  async request(cam, src) {
+  async request(cam, src, { needed } = {}) {
     if (!cam || !src || !/^rtsps?:/i.test(src.url || '')) return 'unsupported';
     const key = `${cam.id}/${src.label}`;
     let e = this.entries.get(key);
     if (!e || e.url !== src.url) {   // new, or the camera was edited
-      e = { url: src.url, client: null, token: null, lastAt: 0, skipUntil: 0, fails: 0, busy: false, error: null };
+      e = { url: src.url, client: null, token: null, lastAt: 0, skipUntil: 0, fails: 0, busy: false, later: null, error: null };
       this.entries.set(key, e);
     }
     const now = Date.now();
     if (now < e.skipUntil) return 'unsupported';
-    if (e.busy || now - e.lastAt < this.minMs) return 'limited';
+    const wait = e.lastAt + this.minMs - now;
+    if (e.busy || wait > 0) {
+      if (e.later) return 'limited';
+      return new Promise((resolve) => {
+        e.later = setTimeout(() => {
+          e.later = null;
+          resolve(needed && !needed() ? 'limited' : this.request(cam, src, { needed }));
+        }, e.busy ? Math.max(wait, 200) : wait);
+        e.later.unref();
+      });
+    }
     e.busy = true; e.lastAt = now;
     try {
       if (!e.client) Object.assign(e, await this._find(cam, src));

@@ -221,13 +221,20 @@ function camera(req, body) {
       { label: 'mjpg', type: 'http', url: 'http://127.0.0.1/x.mjpg' }] };
     const kf = new KeyframeRequester({ minMs: 150 });
     check('keyframe: the profile with the stream\'s address is asked', await kf.request(kcam, kcam.sources[1]) === 'sent' && syncPoints.join() === 'p1', syncPoints.join());
-    check('keyframe: a second request inside the minimum interval is not sent', await kf.request(kcam, kcam.sources[1]) === 'limited' && syncPoints.length === 1);
+    const t1 = Date.now();
+    const later = kf.request(kcam, kcam.sources[1]);          // inside the interval: waits for its end
+    const third = await kf.request(kcam, kcam.sources[1]);    // only one waits
+    const sentNow = syncPoints.length;
+    check('keyframe: a request inside the minimum interval waits for its end, a further one is dropped',
+      third === 'limited' && sentNow === 1 && await later === 'sent' && Date.now() - t1 >= 140 && syncPoints.join() === 'p1,p1', `${third}, ${Date.now() - t1} ms, ${syncPoints.join()}`);
+    check('keyframe: a waiting request is dropped when it is no longer needed',
+      await kf.request(kcam, kcam.sources[1], { needed: () => false }) === 'limited' && syncPoints.length === 2, syncPoints.join());
     await new Promise((r) => setTimeout(r, 170));
-    check('keyframe: sent again after the interval, each stream on its own clock',
-      await kf.request(kcam, kcam.sources[1]) === 'sent' && await kf.request(kcam, kcam.sources[0]) === 'sent' && syncPoints.join() === 'p1,p1,p0', syncPoints.join());
+    check('keyframe: sent at once after the interval, each stream on its own clock',
+      await kf.request(kcam, kcam.sources[1]) === 'sent' && await kf.request(kcam, kcam.sources[0]) === 'sent' && syncPoints.join() === 'p1,p1,p1,p0', syncPoints.join());
     check('keyframe: not an RTSP stream, or an address no profile has → not asked',
       await kf.request(kcam, kcam.sources[3]) === 'unsupported' && await kf.request(kcam, kcam.sources[2]) === 'failed'
-        && /no ONVIF profile/.test(kf.error('k', 'low')) && syncPoints.length === 3, String(kf.error('k', 'low')));
+        && /no ONVIF profile/.test(kf.error('k', 'low')) && syncPoints.length === 4, String(kf.error('k', 'low')));
     check('keyframe: after a failure the camera is left alone', await kf.request(kcam, kcam.sources[2]) === 'unsupported');
     noSyncPoint = true;
     await new Promise((r) => setTimeout(r, 170));
