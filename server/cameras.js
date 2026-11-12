@@ -15,6 +15,7 @@ const fs = require('fs');
 const { StreamSession } = require('./stream-session');
 const { MjpegSession } = require('./mjpeg');
 const { probe } = require('./probe');
+const { KeyframeRequester } = require('./onvif');
 const { normaliseCamera, ID_RE } = require('./config');
 const { hostOf, clearAllSessions, clearMulticastMemory, probeHost } = require('./sources');
 
@@ -31,6 +32,7 @@ class CameraManager {
     this.protectedPids = new Set(); // recordings: never reaped as strays
     this.hub = null;             // set by index.js
     this._probing = new Set();
+    this.keyframes = new KeyframeRequester();  // ONVIF keyframes after packet loss (stream-session.js)
   }
 
   /* --- lookup ------------------------------------------------------------- */

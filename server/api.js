@@ -18,7 +18,7 @@ const { redact, hostOf, clearMulticastMemory } = require('./sources');
 const VERSION = require('../package.json').version;
 
 function register(router, ctx) {
-  const { store, manager, recorder, hub, info, metrics } = ctx;
+  const { store, manager, recorder, hub, info, metrics, lossLog } = ctx;
   const admin = (fn) => async (req, res, params, url) => {
     if (!checkAuth(req, res)) return;
     return fn(req, res, params, url);
@@ -63,6 +63,9 @@ function register(router, ctx) {
       history: q.has('history') && metrics ? metrics.history : undefined,
     });
   });
+
+  /** Packet loss per stream and minute over the last 24 h (loss-log.js). */
+  router.get('/api/loss-history', (req, res) => sendJson(res, 200, { at: Date.now(), rows: lossLog ? lossLog.rows : [] }));
 
   /* --- cameras ------------------------------------------------------------ */
 

@@ -39,6 +39,9 @@ const DEFAULT_SETTINGS = {
     // After RTP packets go missing, hold a stream's frames back until a clean
     // keyframe: a short freeze instead of green smears (stream-session.js).
     holdOnLoss: true,
+    // ... and ask the camera for a keyframe right away over ONVIF, while
+    // somebody is watching, so that freeze ends sooner (onvif.js KeyframeRequester).
+    keyframeOnLoss: true,
   },
   webcodecs: {
     bufferMs: 150,
@@ -332,7 +335,7 @@ function parseImport(name, text) {
 }
 
 module.exports = {
-  DATA_DIR, DEFAULT_SETTINGS, Store, deepMerge, defaultLayout,
+  DATA_DIR, DEFAULT_SETTINGS, Store, deepMerge, defaultLayout, readJson, writeJson,
   normaliseCamera, normaliseLayout, normaliseSource, sourceType, slugify,
   parseImport, parseCamerasXml, parseLayoutsXml, parseProxyJson, ID_RE,
 };

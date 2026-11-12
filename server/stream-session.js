@@ -255,7 +255,7 @@ class StreamSession {
     this.idleTimer = null;
     this.lastVideoAt = 0;
     this.liveSince = 0;
-    this.stats = { bytesIn: 0, bytesOut: 0, frames: 0, skips: 0, kicks: 0, restarts: 0, recycles: 0, rtpGaps: 0, lossHolds: 0, lossHeld: 0 };
+    this.stats = { bytesIn: 0, bytesOut: 0, frames: 0, skips: 0, kicks: 0, restarts: 0, recycles: 0, rtpGaps: 0, lossHolds: 0, lossHeld: 0, keyRequests: 0 };
     this.multicastLoss = [];        // times of recent RTP gaps while on multicast (_onMulticastLoss)
     this._bpsSample = { at: Date.now(), bytes: 0, inBytes: 0, frames: 0, bps: 0, inBps: 0, fps: 0 };
     this.ptsLagMs = null;
@@ -630,7 +630,25 @@ class StreamSession {
       if (!p.lossHold) { p.lossHold = Date.now(); this.stats.lossHolds++; }
       p.lossFresh = true;
     }
+    if (this.manager.store.settings.ffmpeg.keyframeOnLoss !== false) this._requestKeyframe();
     if (p.multicast) this._onMulticastLoss(p, gaps);
+  }
+
+  /**
+   * Ask the camera for a keyframe now, so the picture held after a loss (or
+   * smeared, with holdOnLoss off) is whole again in a fraction of a second
+   * instead of at the camera's next keyframe.  Only while somebody is
+   * watching: nobody sees an unwatched stream's freezes, and the camera is
+   * spared the requests.  A camera that cannot do it is left alone (onvif.js).
+   */
+  _requestKeyframe() {
+    const kf = this.manager.keyframes;
+    const src = this.source;
+    if (!kf || !src || !this.consumerCount) return;
+    kf.request(this.manager.camera(this.cameraId), src).then((r) => {
+      if (r === 'sent') this.stats.keyRequests++;
+      else if (r === 'failed') this.log(`no keyframe on request: ${kf.error(this.cameraId, this.label)}`);
+    });
   }
 
   /**
