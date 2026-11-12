@@ -41,7 +41,9 @@ server/cameras.js         camera list/status, sessions, keep-warm, recycle, stra
 server/api.js             REST API (see README)    server/config.js  persistence, defaults, XML/JSON import parsers
 server/sources.js         FFmpeg input args per URL type (incl. RTSP multicast + its fallback memory), HTTP session-cookie
                           login, friendly error messages
-server/onvif.js           ONVIF discovery (stream URIs, multicast URIs and groups) and lookupMulticast for existing cameras
+server/onvif.js           ONVIF discovery (stream URIs, multicast URIs and groups), lookupMulticast for existing cameras,
+                          KeyframeRequester (a keyframe from the camera after packet loss)
+server/loss-log.js        packet loss per stream and minute, 24 h, saved to DATA_DIR/loss-history.json (/api/loss-history)
 server/recordings.js  scan.js  probe.js  tls.js (local CA)  legacy-proxy.js (camera-proxy endpoints)
 public/js/camera/         viewer.js (CameraGrid/CameraPane: tiers, budget, zoom, quality, per-pane audio),
                           webcodecsClient.js, msePlayer.js (<video> fallback), audioWorkletProcessor.js
@@ -55,8 +57,10 @@ public/styles/camera-viewer.css    full-page styles; camera-wall.css is the SAME
 config/                   first-boot seed. Real cameras.xml / camera-layouts.xml contain camera passwords: git-ignored,
                           never commit them. Only *.example.xml are tracked.
 test/e2e.js               browser smoke test     test/features.js  multi-audio, zoom, quality, per-pane speakers
-test/onvif.js             fake ONVIF camera: multicast discovery/lookup, FFmpeg args, fallback memory (no instance needed)
-test/network.js           unreachable cameras: the TCP knock, STREAM_PROBLEM, wait-then-restart (no instance needed)
+test/onvif.js             fake ONVIF camera: multicast discovery/lookup, keyframe requests, FFmpeg args, fallback memory
+                          (no instance needed)
+test/network.js           unreachable cameras: the TCP knock, STREAM_PROBLEM, wait-then-restart; packet loss: held frames,
+                          keyframe requests, loss history (no instance needed)
 ```
 
 ## Rules
@@ -138,6 +142,11 @@ test/network.js           unreachable cameras: the TCP knock, STREAM_PROBLEM, wa
     FFmpeg puts out (even a keyframe) to the next keyframe
     (`_onRtpLoss` / `_holdAfterLoss`, `ffmpeg.holdOnLoss`). FFmpeg prints
     the warning before the damaged frame, so the order holds;
+  - the same warning asks the camera for a keyframe over ONVIF
+    (`_requestKeyframe`, `KeyframeRequester` in onvif.js,
+    `ffmpeg.keyframeOnLoss`), only while the stream has viewers, at most
+    once a second. The Temple cameras answer in 40-100 ms; the request
+    changes no camera setting;
   - `transport: 'multicast'` falls back to TCP; with the global `prefer`, a
     `udp` source falls back to UDP;
   - `multicastUrl` is only for cameras whose multicast RTSP address

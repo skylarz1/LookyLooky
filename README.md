@@ -320,6 +320,15 @@ LookyLooky copes with that by itself:
   smearing. This applies to any RTP over UDP, multicast or not.
   `ffmpeg.holdOnLoss: false` in the settings turns it off (it applies at
   once, no restart).
+- **The camera is asked for a keyframe after a lost packet**, over ONVIF
+  (`SetSynchronizationPoint`), while somebody is watching the stream. The
+  freeze then ends when that keyframe arrives instead of at the camera's
+  next scheduled one: on cam-32 the typical freeze went from 0.87 s to
+  0.2 s (2026-11-12). It changes no camera setting, asks at most once a
+  second per stream, and a camera that doesn't answer ONVIF on port 80 or
+  refuses the request is left alone for 10 minutes. `/stats` shows the
+  requests when you hover a stream's RTP gaps.
+  `ffmpeg.keyframeOnLoss: false` turns it off.
 - **Stay on multicast when packets are lost** (a checkbox under Multicast
   in the camera's settings): the stream keeps multicast through lost packets
   and stalls, and freezes briefly at each loss. It's for cameras
@@ -377,6 +386,11 @@ COMPOSE_FILE=docker-compose.yml:docker-compose.host.yml:docker-compose.override.
   lag for everyone. Charts cover the last 30 minutes.
 - **Streams:** state, multicast or unicast, frames per second and bitrate in
   from the camera, viewers, bitrate out, and each FFmpeg's CPU and memory.
+- **Packet loss, last 24 hours:** one row per stream that lost packets, with
+  a bar for every 5 minutes, so loss that follows the time of day or the
+  games shows up. The counters under Streams start again with every
+  restart; this history is kept in the data folder (`loss-history.json`)
+  and survives restarts and deploys. JSON: `/api/loss-history`.
 - **Viewers:** every open pane.
   - **Queue:** what the server still has to send it, as a size and as time at
     the stream's bitrate. This is the lag the server adds.
@@ -448,6 +462,7 @@ LOOKY_ADMIN_PASSWORD=... node tools/browserload.js --url https://looky.local --i
 | Method | Path | |
 |---|---|---|
 | GET | `/api/info`, `/api/stats`, `/api/health` | Server identity, buffer, decode budget and quality policy; live stats (`?viewers=1` adds every viewer, admin; `?history=1` the last 30 min) |
+| GET | `/api/loss-history` | Packet loss per stream and minute, last 24 h: `rows: [{ t, s: { "<camera>/<stream>": [gaps, held frames, frames sent, freezes] } }]` |
 | GET / POST | `/api/cameras` | List (no credentials, with each watched camera's `problem`, see above); add. Each stream is tested first, and a failure returns 422 `STREAM_TEST_FAILED` with the reasons; send `force:true` to save anyway |
 | GET / PUT / DELETE | `/api/cameras/:id` | Full definition (admin) / edit / remove |
 | POST | `/api/cameras/:id/start` `stop` `restart` | |
@@ -471,11 +486,12 @@ server/            Node server (only dependency: ws)
   stream-session.js  one FFmpeg per camera stream, viewers, GOP cache, backpressure, recycle
   fmp4.js          fragmented-MP4 parser; completes H.265 configs from in-band parameter sets
   metrics.js       host, process and FFmpeg load for /api/stats
+  loss-log.js      packet loss per stream and minute, 24 h, for /api/loss-history
   protocol.js      binary wire protocol
   mjpeg.js         thumbnails / MJPEG / snapshots (decoded from the running stream)
   cameras.js       camera list, status, sessions, recycle
   api.js           REST API          recordings.js  recordings
-  onvif.js         ONVIF discovery   scan.js        subnet scan
+  onvif.js         ONVIF discovery, keyframes on request   scan.js   subnet scan
   sources.js       FFmpeg inputs, camera session login, error messages
   tls.js           local CA + server certificate
   legacy-proxy.js  camera-proxy compatible endpoints

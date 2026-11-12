@@ -168,6 +168,13 @@ class OnvifClient {
     return unescape(tag(xml, 'Uri') || '');
   }
 
+  /** Ask the encoder for a keyframe now.  The camera sends one on every
+   *  stream of the profile, multicast included, without touching its settings. */
+  async syncPoint(token) {
+    await this.call(this.mediaUrl,
+      `<SetSynchronizationPoint xmlns="${NS_MEDIA}"><ProfileToken>${escapeXml(token)}</ProfileToken></SetSynchronizationPoint>`);
+  }
+
   /** The RTP-Multicast URI, or '' when the camera has none.  The spec's
    *  transport for it is UDP; some cameras only accept RTSP there. */
   async multicastUri(token) {
@@ -278,6 +285,77 @@ async function lookupMulticast(cam, { port = 80 } = {}) {
 }
 
 /**
+ * Keyframes on request.  After lost packets a stream's picture is held until
+ * the next keyframe (stream-session.js _onRtpLoss); a camera asked over ONVIF
+ * sends one at once instead of at the end of its keyframe interval (the
+ * Uniview Temple cameras: 40-100 ms after the request, 2026-11-12), so the
+ * freeze is that much shorter.  It changes no camera setting, and the
+ * keyframe goes to every receiver of the stream, multicast included.
+ *
+ * One ONVIF client per stream, made on first use: the profile is the one
+ * whose RTSP address is the stream's, else main = the largest and sub = the
+ * smallest.  A camera that does not answer, rejects the login or has no such
+ * profile is asked again after 30 s, then left alone for `retryMs`.  At most
+ * one request per stream every `minMs`.
+ */
+class KeyframeRequester {
+  constructor({ minMs = 1000, retryMs = 10 * 60000, port = 80 } = {}) {
+    this.minMs = minMs; this.retryMs = retryMs; this.port = port;
+    this.entries = new Map();   // "id/label" -> { url, client, token, lastAt, skipUntil, fails, busy, error }
+  }
+
+  async _find(cam, src) {
+    const u = new URL(src.url.replace(/^rtsps?:/i, 'http:'));
+    const c = new OnvifClient({
+      host: u.hostname, port: cam.onvifPort || this.port,
+      user: decodeURIComponent(u.username || ''), pass: decodeURIComponent(u.password || ''),
+    });
+    await c.syncClock();
+    await c.findMedia();
+    const profiles = await c.profiles();
+    const want = streamKey(src.url);
+    for (const p of profiles) {
+      const uri = await c.streamUri(p.token).catch((err) => { if (err.auth) throw err; return ''; });
+      if (uri && streamKey(withCredentials(uri, u.hostname, '', '')) === want) return { client: c, token: p.token };
+    }
+    const byArea = [...profiles].sort((a, b) => (b.width * b.height || 0) - (a.width * a.height || 0));
+    const p = byArea.length < 2 ? null : src.label === 'main' ? byArea[0] : src.label === 'sub' ? byArea[byArea.length - 1] : null;
+    if (!p) throw new Error('no ONVIF profile matches this stream');
+    return { client: c, token: p.token };
+  }
+
+  /**
+   * Ask `cam` for a keyframe on its source `src`.  Never throws.
+   * @returns {Promise<'sent'|'limited'|'unsupported'|'failed'>} 'failed' once per failure (see error()), 'unsupported' while the camera is left alone
+   */
+  async request(cam, src) {
+    if (!cam || !src || !/^rtsps?:/i.test(src.url || '')) return 'unsupported';
+    const key = `${cam.id}/${src.label}`;
+    let e = this.entries.get(key);
+    if (!e || e.url !== src.url) {   // new, or the camera was edited
+      e = { url: src.url, client: null, token: null, lastAt: 0, skipUntil: 0, fails: 0, busy: false, error: null };
+      this.entries.set(key, e);
+    }
+    const now = Date.now();
+    if (now < e.skipUntil) return 'unsupported';
+    if (e.busy || now - e.lastAt < this.minMs) return 'limited';
+    e.busy = true; e.lastAt = now;
+    try {
+      if (!e.client) Object.assign(e, await this._find(cam, src));
+      await e.client.syncPoint(e.token);
+      e.fails = 0; e.error = null;
+      return 'sent';
+    } catch (err) {
+      e.client = null; e.token = null; e.error = err.message;
+      e.skipUntil = Date.now() + (e.fails++ ? this.retryMs : 30000);
+      return 'failed';
+    } finally { e.busy = false; }
+  }
+
+  error(camId, label) { return this.entries.get(`${camId}/${label}`)?.error || null; }
+}
+
+/**
  * Streams that send to the same multicast group and port as another stream.
  * Dahua cameras all ship with group 224.1.2.4 and the same ports, so two of
  * them on multicast arrive mixed at every receiver until each camera is given
@@ -298,4 +376,4 @@ function sharedGroups(entries) {
   return out;
 }
 
-module.exports = { discover, withCredentials, lookupMulticast, streamKey, sharedGroups };
+module.exports = { OnvifClient, KeyframeRequester, discover, withCredentials, lookupMulticast, streamKey, sharedGroups };

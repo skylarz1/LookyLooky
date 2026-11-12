@@ -1,7 +1,7 @@
 /**
  * Multicast without a camera:  node test/onvif.js
  * Starts nothing else and needs no LookyLooky instance.  A fake ONVIF camera
- * (WS-Security digest checked) answers discovery; then the FFmpeg input
+ * (WS-Security digest checked) answers discovery and keyframe requests; then the FFmpeg input
  * arguments, the multicast fallback memory and the cameras.xml import are
  * checked directly.
  */
@@ -9,7 +9,7 @@ const http = require('http');
 const crypto = require('crypto');
 const path = require('path');
 process.env.LOOKY_DATA_DIR = process.env.LOOKY_DATA_DIR || path.join(__dirname, 'out', 'onvif-data');
-const { discover, lookupMulticast, sharedGroups } = require('../server/onvif');
+const { discover, lookupMulticast, sharedGroups, KeyframeRequester } = require('../server/onvif');
 const { inputArgs, noteMulticast, multicastState, clearMulticastMemory, reachable } = require('../server/sources');
 const { parseMulticastReply } = require('../server/probe');
 const { normaliseCamera, parseCamerasXml, DEFAULT_SETTINGS } = require('../server/config');
@@ -43,6 +43,9 @@ function authorised(xml) {
 
 // Answers like something that speaks ONVIF but has no video (a UniFi Protect console).
 let noProfiles = false;
+// Keyframe requests (SetSynchronizationPoint): the profile tokens asked, and whether the camera refuses them.
+const syncPoints = [];
+let noSyncPoint = false;
 
 function camera(req, body) {
   if (/GetSystemDateAndTime/.test(body)) {
@@ -68,6 +71,11 @@ function camera(req, body) {
     const uri = stream === 'RTP-Multicast' ? p.mc[protocol] : p.uri;
     if (!uri) return { status: 400, xml: fault('Unsupported StreamSetup') };
     return env(`<trt:GetStreamUriResponse><trt:MediaUri><tt:Uri>${uri}</tt:Uri></trt:MediaUri></trt:GetStreamUriResponse>`);
+  }
+  if (/SetSynchronizationPoint/.test(body)) {
+    if (noSyncPoint) return { status: 400, xml: fault('Action not supported') };
+    syncPoints.push((/<ProfileToken>([^<]+)</.exec(body) || [])[1]);
+    return env('<trt:SetSynchronizationPointResponse/>');
   }
   return { status: 400, xml: fault('Unknown action') };
 }
@@ -204,6 +212,31 @@ function camera(req, body) {
     check('ffmpeg: "prefer" on a udp source falls back to udp', a.t === 'udp');
     const http1 = await inputArgs({ label: 'main', type: 'http', url: 'http://h/x.mjpg', transport: 'multicast' }, { ...S, ffmpeg: { ...S.ffmpeg, multicast: 'prefer' } }, {});
     check('ffmpeg: non-RTSP sources never use multicast', !http1.multicast && !http1.args.includes('udp_multicast'));
+
+    // --- keyframes on request ---------------------------------------------
+    const kcam = { id: 'k', onvifPort: port, sources: [
+      { label: 'main', type: 'rtsp', url: `rtsp://${USER}:${encodeURIComponent(PASS)}@127.0.0.1:554/cam/realmonitor?channel=1&subtype=0` },
+      { label: 'sub', type: 'rtsp', url: `rtsp://${USER}:${encodeURIComponent(PASS)}@127.0.0.1:554/cam/realmonitor?channel=1&subtype=1` },
+      { label: 'low', type: 'rtsp', url: `rtsp://${USER}:${encodeURIComponent(PASS)}@127.0.0.1:554/proxied/elsewhere` },
+      { label: 'mjpg', type: 'http', url: 'http://127.0.0.1/x.mjpg' }] };
+    const kf = new KeyframeRequester({ minMs: 150 });
+    check('keyframe: the profile with the stream\'s address is asked', await kf.request(kcam, kcam.sources[1]) === 'sent' && syncPoints.join() === 'p1', syncPoints.join());
+    check('keyframe: a second request inside the minimum interval is not sent', await kf.request(kcam, kcam.sources[1]) === 'limited' && syncPoints.length === 1);
+    await new Promise((r) => setTimeout(r, 170));
+    check('keyframe: sent again after the interval, each stream on its own clock',
+      await kf.request(kcam, kcam.sources[1]) === 'sent' && await kf.request(kcam, kcam.sources[0]) === 'sent' && syncPoints.join() === 'p1,p1,p0', syncPoints.join());
+    check('keyframe: not an RTSP stream, or an address no profile has → not asked',
+      await kf.request(kcam, kcam.sources[3]) === 'unsupported' && await kf.request(kcam, kcam.sources[2]) === 'failed'
+        && /no ONVIF profile/.test(kf.error('k', 'low')) && syncPoints.length === 3, String(kf.error('k', 'low')));
+    check('keyframe: after a failure the camera is left alone', await kf.request(kcam, kcam.sources[2]) === 'unsupported');
+    noSyncPoint = true;
+    await new Promise((r) => setTimeout(r, 170));
+    const refused = await kf.request(kcam, kcam.sources[0]);
+    check('keyframe: a camera that refuses it reports the failure once, with the camera\'s reason',
+      refused === 'failed' && /not supported/i.test(kf.error('k', 'main')) && await kf.request(kcam, kcam.sources[0]) === 'unsupported', `${refused}: ${kf.error('k', 'main')}`);
+    noSyncPoint = false;
+    const wrong = { ...kcam, id: 'w', sources: [{ label: 'sub', type: 'rtsp', url: 'rtsp://admin:nope@127.0.0.1:554/cam/realmonitor?channel=1&subtype=1' }] };
+    check('keyframe: a wrong password is a failure, not an exception', await kf.request(wrong, wrong.sources[0]) === 'failed' && /username or password/.test(kf.error('w', 'sub')), String(kf.error('w', 'sub')));
 
     // --- cameras.xml ------------------------------------------------------
     const xml = `<cameras><camera-settings multicast="prefer"/><camera camera-id="c1" name="C1">`

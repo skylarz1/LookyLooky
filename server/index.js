@@ -16,11 +16,12 @@ const http = require('http');
 const https = require('https');
 const net = require('net');
 
-const { Store, parseImport, DATA_DIR } = require('./config');
+const { Store, parseImport, DATA_DIR, readJson, writeJson } = require('./config');
 const { CameraManager } = require('./cameras');
 const { Recorder } = require('./recordings');
 const { StreamHub } = require('./ws-server');
 const { Metrics } = require('./metrics');
+const { LossLog } = require('./loss-log');
 const { Router, sendError, sendFile, checkAuth, cors } = require('./http-util');
 const api = require('./api');
 const legacy = require('./legacy-proxy');
@@ -39,6 +40,7 @@ const hub = new StreamHub(manager, { allowedOrigins: allowed });
 manager.hub = hub;
 const metrics = new Metrics(manager, hub);
 manager.metrics = metrics;
+const lossLog = new LossLog(manager, { read: readJson, write: writeJson });
 
 const info = {
   startedAt: Date.now(),
@@ -49,7 +51,7 @@ const info = {
 
 const router = new Router();
 legacy.register(router, manager);
-const { importFiles } = api.register(router, { store, manager, recorder, hub, info, metrics });
+const { importFiles } = api.register(router, { store, manager, recorder, hub, info, metrics, lossLog });
 
 /* --- first boot: seed from the mounted config folder ----------------------- */
 
@@ -212,6 +214,7 @@ function shutdown(sig) {
   stopping = true;
   console.log(`[boot] ${sig} — shutting down`);
   recorder.shutdown();
+  lossLog.save();
   hub.closeAll(1001, 'server shutting down');
   setTimeout(() => { manager.shutdown(); process.exit(0); }, recorder.active ? 3000 : 300);
 }
