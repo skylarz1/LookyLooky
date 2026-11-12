@@ -630,7 +630,7 @@ class StreamSession {
       if (!p.lossHold) { p.lossHold = Date.now(); this.stats.lossHolds++; }
       p.lossFresh = true;
     }
-    if (this.manager.store.settings.ffmpeg.keyframeOnLoss !== false) this._requestKeyframe();
+    if (this.manager.store.settings.ffmpeg.keyframeOnLoss !== false) this._requestKeyframe(p);
     if (p.multicast) this._onMulticastLoss(p, gaps);
   }
 
@@ -640,12 +640,16 @@ class StreamSession {
    * instead of at the camera's next keyframe.  Only while somebody is
    * watching: nobody sees an unwatched stream's freezes, and the camera is
    * spared the requests.  A camera that cannot do it is left alone (onvif.js).
+   * A request that had to wait its turn is dropped if `p`'s picture is no
+   * longer held by then (with holdOnLoss off there is no telling: it goes out).
    */
-  _requestKeyframe() {
+  _requestKeyframe(p) {
     const kf = this.manager.keyframes;
     const src = this.source;
     if (!kf || !src || !this.consumerCount) return;
-    kf.request(this.manager.camera(this.cameraId), src).then((r) => {
+    const needed = () => this.consumerCount > 0 && p === this.active
+      && (!!p.lossHold || this.manager.store.settings.ffmpeg.holdOnLoss === false);
+    kf.request(this.manager.camera(this.cameraId), src, { needed }).then((r) => {
       if (r === 'sent') this.stats.keyRequests++;
       else if (r === 'failed') this.log(`no keyframe on request: ${kf.error(this.cameraId, this.label)}`);
     });

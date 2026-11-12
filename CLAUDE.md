@@ -145,8 +145,9 @@ test/network.js           unreachable cameras: the TCP knock, STREAM_PROBLEM, wa
   - the same warning asks the camera for a keyframe over ONVIF
     (`_requestKeyframe`, `KeyframeRequester` in onvif.js,
     `ffmpeg.keyframeOnLoss`), only while the stream has viewers, at most
-    once a second. The Temple cameras answer in 40-100 ms; the request
-    changes no camera setting;
+    once a second; a loss inside that second is asked for at its end if
+    the picture is still held. The Temple cameras answer in 40-100 ms; the
+    request changes no camera setting;
   - `transport: 'multicast'` falls back to TCP; with the global `prefer`, a
     `udp` source falls back to UDP;
   - `multicastUrl` is only for cameras whose multicast RTSP address

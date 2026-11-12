@@ -324,9 +324,11 @@ LookyLooky copes with that by itself:
   (`SetSynchronizationPoint`), while somebody is watching the stream. The
   freeze then ends when that keyframe arrives instead of at the camera's
   next scheduled one: on cam-32 the typical freeze went from 0.87 s to
-  0.2 s (2026-11-12). It changes no camera setting, asks at most once a
-  second per stream, and a camera that doesn't answer ONVIF on port 80 or
-  refuses the request is left alone for 10 minutes. `/stats` shows the
+  0.2 s (2026-11-12). It changes no camera setting and asks at most once a
+  second per stream: a loss inside that second gets its request when the
+  second is over, if the picture is still frozen then. A camera that
+  doesn't answer ONVIF on port 80 or refuses the request is left alone for
+  10 minutes. `/stats` shows the
   requests when you hover a stream's RTP gaps.
   `ffmpeg.keyframeOnLoss: false` turns it off.
 - **Stay on multicast when packets are lost** (a checkbox under Multicast

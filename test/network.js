@@ -155,20 +155,27 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     // --- a keyframe asked of the camera after a loss ------------------------
     const asked = (watching, on = true) => {
       const c = { id: 'q', name: 'Q', enabled: true, sources: [{ label: 'sub', type: 'rtsp', url: 'rtsp://192.0.2.9/x', transport: 'multicast', keepMulticast: true }] };
-      const reqs = [];
-      const keyframes = { request: async (cam, src) => { reqs.push(`${cam.id}/${src.label}`); return 'sent'; }, error: () => null };
+      const reqs = []; let needed = null;
+      const keyframes = { request: async (cam, src, opts) => { reqs.push(`${cam.id}/${src.label}`); needed = opts.needed; return 'sent'; }, error: () => null };
       const m = new StreamSession({ ...fake, store: { settings: { ...settings, ffmpeg: { ...settings.ffmpeg, keyframeOnLoss: on } } }, camera: () => c, keyframes }, 'q', 'sub');
       m.log = () => {};
       const p = { multicast: true }; m.active = p;
       if (watching) m.clients.add({});
       m._onRtpLoss(p, 1);
       clearInterval(m.watchdog);
-      return { reqs, m };
+      return { reqs, m, p, needed: () => needed() };
     };
     let a = asked(true);
     await sleep(0);
     check('keyframe on loss: asked of the camera while somebody watches, and counted', a.reqs.join() === 'q/sub' && a.m.stats.keyRequests === 1, JSON.stringify(a.reqs));
+    const stillHeld = a.needed();
+    a.p.lossHold = 0;
+    check('keyframe on loss: a waiting request is needed while the picture is held, not after', stillHeld === true && a.needed() === false);
     check('keyframe on loss: not asked for a stream nobody watches', asked(false).reqs.length === 0);
+    const edited = new CameraManager({ settings: DEFAULT_SETTINGS, saveCameras() {}, cameras: [{ id: 'e0', name: 'E0', enabled: true, sources: [{ label: 'main', url: 'test:640x360@25' }] }] });
+    let warmed = 0; edited.applyKeepWarm = () => { warmed++; }; edited.probeCamera = async () => {};
+    edited.update('e0', { sources: [{ label: 'main', url: 'test:320x180@25' }] });
+    check('editing a camera starts its always-on streams again', warmed === 1);
     check('keyframe on loss: keyframeOnLoss false asks nothing', asked(true, false).reqs.length === 0);
 
     // --- loss history --------------------------------------------------------

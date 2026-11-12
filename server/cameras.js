@@ -211,6 +211,7 @@ class CameraManager {
       for (const k of [...this.variants.keys()]) if (k.startsWith(id + '/')) this.variants.delete(k);
       this.probeCamera(existing);
     }
+    this.applyKeepWarm();   // its always-on streams were just torn down, or it was switched on
     return existing;
   }
 
