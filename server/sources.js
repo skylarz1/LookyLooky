@@ -5,6 +5,7 @@
  *
  *   rtsp://  the normal case — IP cameras, NVRs, UniFi Protect (rtsp://host:7447/…).
  *            Over TCP (default), UDP, or multicast (see "Multicast" below).
+ *            Optionally from the camera's recorder first (see "DVR first" below).
  *   http://  cameras that serve a live MP4/MJPEG over HTTP.  Includes the old
  *            camera-proxy's session-cookie login (Cortex / Hikvision-style
  *            "POST /login then send the cookie"), ported here so those cameras
@@ -162,6 +163,26 @@ function clearMulticastMemory(prefix = '') {
   for (const k of [...multicastMemory.keys()]) if (k.startsWith(prefix)) multicastMemory.delete(k);
 }
 
+/* --- DVR first ----------------------------------------------------------- */
+/*
+ * A source may carry a `dvrUrl`: the RTSP address at which the camera's
+ * recorder (DVR/NVR) relays the same stream.  The recorder already pulls the
+ * camera, so playing from it costs the camera nothing, where every direct
+ * viewer is one more connection for the camera to serve.  Measured on four
+ * Dahua/Amcrest recorders: the relay passes the video on unchanged and adds
+ * about 25 ms.
+ *
+ * Such a stream plays from the recorder (always RTSP over TCP).  When the
+ * recorder gives no picture, refuses, or stalls, the stream starts again from
+ * `url`, the camera itself, exactly as a source without a dvrUrl would, and
+ * goes back to the recorder make-before-break once it plays again: tried
+ * every settings.ffmpeg.dvrRetryMs, or DVR_AUTH_RETRY_MS after the recorder
+ * rejected the login (recorders lock an account after a few bad logins).
+ * See StreamSession._dvrFailed.
+ */
+
+const DVR_AUTH_RETRY_MS = 24 * 60 * 60 * 1000;
+
 /* --- URLs ---------------------------------------------------------------- */
 
 function buildUrl(source) {
@@ -190,9 +211,9 @@ function basicHeader(auth) {
  * FFmpeg input arguments for a source.
  * @param {object} source normalised source
  * @param {object} settings full settings
- * @param {object} opts { key, lowLatency=true, log }
+ * @param {object} opts { key, lowLatency=true, log, dvr: true = from the source's dvrUrl (see "DVR first") }
  */
-async function inputArgs(source, settings, { key = '', lowLatency = true, slowProbe = false, forceTcp = false, multicast, log } = {}) {
+async function inputArgs(source, settings, { key = '', lowLatency = true, slowProbe = false, forceTcp = false, multicast, dvr = false, log } = {}) {
   const type = source.type || sourceType(source.url);
   // NOT +nobuffer: it discards the packets read while probing, and the first
   // of those is the keyframe — every start would then wait a whole extra GOP
@@ -205,6 +226,12 @@ async function inputArgs(source, settings, { key = '', lowLatency = true, slowPr
       '-probesize', slowProbe ? '5000000' : '500000', '-analyzeduration', slowProbe ? '5000000' : '500000']
     : ['-fflags', '+genpts+discardcorrupt'];
 
+  if (dvr && source.dvrUrl) {
+    return {
+      args: ['-rtsp_transport', 'tcp', '-timeout', '10000000', ...lat, '-i', source.dvrUrl],
+      video: '0:v:0', audio: '0:a:0', dvr: true,
+    };
+  }
   if (type === 'test') {
     const m = /(\d+)x(\d+)(?:@(\d+))?/.exec(source.url) || [];
     const w = m[1] || 1280, h = m[2] || 720, r = m[3] || 25;
@@ -285,5 +312,5 @@ function friendlyError(stderr) {
 module.exports = {
   inputArgs, buildUrl, redact, hostOf, friendlyError, login, getSession, clearSession, clearAllSessions,
   httpRequest, basicHeader, wantsMulticast, multicastState, noteMulticast, clearMulticastMemory, MULTICAST_RETRY_MS,
-  reachable, probeHost,
+  reachable, probeHost, DVR_AUTH_RETRY_MS,
 };

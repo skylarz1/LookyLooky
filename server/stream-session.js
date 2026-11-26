@@ -37,6 +37,7 @@ const { Fmp4Parser, inbandParamSets, buildHvcc, replaceHvcc, hevcCodecString } =
 const P = require('./protocol');
 const {
   inputArgs, friendlyError, redact, clearSession, noteMulticast, clearMulticastMemory, wantsMulticast, MULTICAST_RETRY_MS, probeHost,
+  DVR_AUTH_RETRY_MS,
 } = require('./sources');
 
 const SOFT_CAP = 1.5 * 1024 * 1024;
@@ -56,6 +57,7 @@ class Pipeline extends EventEmitter {
     super();
     this.session = session;
     this.withAudio = opts.withAudio;
+    this.dvr = !!opts.dvr;          // play from the source's dvrUrl (the recorder), not the camera
     this.proc = null;
     this.startedAt = Date.now();
     this.stderrTail = '';
@@ -76,8 +78,10 @@ class Pipeline extends EventEmitter {
       slowProbe: s.slowProbe,
       forceTcp: s.forceTcp,
       multicast: Date.now() < s.noMulticastUntil ? false : undefined,
+      dvr: this.dvr,
       log: (m) => s.log(m),
     });
+    this.dvr = !!input.dvr;
     this.multicast = !!input.multicast;
     const probed = s.manager.variantInfo(s.cameraId, s.label);
     const transcode = src.transcode || input.needsEncode
@@ -100,7 +104,7 @@ class Pipeline extends EventEmitter {
       args.push('-map', input.audio, '-vn', '-sn', '-dn', '-c:a', 'pcm_mulaw', '-ar', String(PCM_RATE), '-ac', '1',
         '-f', 'mulaw', '-flush_packets', '1', 'pipe:4');
     }
-    s.log(`spawn ${redact(this.multicast ? (src.multicastUrl || src.url) : src.url)}${this.multicast ? ' (multicast)' : ''}${transcode ? ' (transcode h264)' : ''}${this.withAudio ? '' : ' (no audio)'}`);
+    s.log(`spawn ${redact(this.dvr ? src.dvrUrl : this.multicast ? (src.multicastUrl || src.url) : src.url)}${this.dvr ? ' (DVR)' : ''}${this.multicast ? ' (multicast)' : ''}${transcode ? ' (transcode h264)' : ''}${this.withAudio ? '' : ' (no audio)'}`);
 
     const proc = spawn(settings.ffmpeg.path || 'ffmpeg', args, {
       stdio: ['ignore', 'pipe', 'pipe', 'pipe', 'pipe'],
@@ -236,6 +240,8 @@ class StreamSession {
     this.forceTcp = false;          // set when an RTSP/UDP source never produced a picture
     this.noMulticastUntil = 0;      // set when multicast gave no picture or kept stalling
     this.multicastStalls = [];      // stall times while on multicast (see _onExit)
+    this.noDvrUntil = 0;            // set when the recorder (source.dvrUrl) failed: the camera is played until then
+    this.dvrError = null;           // why the recorder was left, while the camera is played instead
     this.problem = null;            // { kind, text, since }: why viewers have no picture (P.PROBLEM)
     this.lostAt = 0;                // when the picture was lost (or the first start failed); 0 while fine
     this._retryGen = 0;             // bumped per failure, so a stale reachability answer is dropped
@@ -255,7 +261,7 @@ class StreamSession {
     this.idleTimer = null;
     this.lastVideoAt = 0;
     this.liveSince = 0;
-    this.stats = { bytesIn: 0, bytesOut: 0, frames: 0, skips: 0, kicks: 0, restarts: 0, recycles: 0, rtpGaps: 0, lossHolds: 0, lossHeld: 0, keyRequests: 0 };
+    this.stats = { bytesIn: 0, bytesOut: 0, frames: 0, skips: 0, kicks: 0, restarts: 0, recycles: 0, rtpGaps: 0, lossHolds: 0, lossHeld: 0, keyRequests: 0, dvrFallbacks: 0 };
     this.multicastLoss = [];        // times of recent RTP gaps while on multicast (_onMulticastLoss)
     this._bpsSample = { at: Date.now(), bytes: 0, inBytes: 0, frames: 0, bps: 0, inBps: 0, fps: 0 };
     this.ptsLagMs = null;
@@ -288,7 +294,8 @@ class StreamSession {
     this.state = 'starting';
     this._startedAt = Date.now();
     const withAudio = this.audioAvailable !== false && this.manager.variantInfo(this.cameraId, this.label)?.hasAudio !== false;
-    const p = new Pipeline(this, { withAudio });
+    const dvr = this._useDvr();
+    const p = new Pipeline(this, { withAudio, dvr });
     this.active = p;
     this._bind(p);
     p.start().catch((err) => {
@@ -300,8 +307,9 @@ class StreamSession {
     });
     // FFmpeg takes up to 25 s to give up on a camera that isn't there.  A
     // TCP knock on its port answers in at most 3, so an unplugged camera or
-    // a dead network shows as such right away.
-    probeHost(this.source.url, 3000).then((h) => {
+    // a dead network shows as such right away.  For a stream that plays from
+    // its recorder the knock is on the recorder: gone, and the camera is next.
+    probeHost(dvr ? this.source.dvrUrl : this.source.url, 3000).then((h) => {
       if (h === 'unreachable' && p === this.active && this.state === 'starting' && !p.exited) {
         p.stderrTail += '\nNo route to host';
         p.kill();
@@ -368,6 +376,9 @@ class StreamSession {
         noteMulticast(`${this.cameraId}/${this.label}`, false);
         this.log('multicast retry got no picture — staying on unicast');
       }
+      // The recorder, tried again, still gives no picture: stay on the camera.
+      // (Not when it only has to start again as hev1: _watchdog tries it again at once.)
+      if (p.dvr && !p.needsRestart) this._dvrFailed(friendlyError(tail) || 'The DVR gave no picture');
       return;
     }
     if (p !== this.active) return;
@@ -391,6 +402,17 @@ class StreamSession {
         && /dimensions not set|unspecified size|Could not find codec parameters|codec frame size is not set/i.test(tail || '')) {
       this.slowProbe = true;
       this.log('stream parameters not found in a short probe — retrying with a long one');
+      this._spawn();
+      return;
+    }
+    // DVR first (sources.js): the recorder gave no picture, refused, or
+    // stopped.  Play the camera itself, at once and without counting a
+    // restart: this is the fallback working, not the stream failing.  The
+    // recorder is tried again later (_watchdog), make-before-break.
+    if (p.dvr) {
+      this._dvrFailed(why);
+      this._dropPicture();
+      if (this.consumerCount === 0 && !this.manager.keepWarm(this.cameraId, this.label)) { this.state = 'idle'; return; }
       this._spawn();
       return;
     }
@@ -455,12 +477,7 @@ class StreamSession {
     this.lastError = why;
     if (/rejected the username/.test(why)) clearSession(`${this.cameraId}/${this.label}`);
     this.log(`exited: ${why}`);
-    this._broadcast(P.streamReset(), true);
-    for (const c of this.clients) c.configSent = false;
-    for (const r of this.rawConsumers) r.onReset?.();
-    const hadPicture = this.liveSince > 0;
-    if (!this.lostAt) this.lostAt = hadPicture && this.lastVideoAt ? this.lastVideoAt : Date.now();
-    this._resetCaches();
+    const hadPicture = this._dropPicture();
 
     if (this.consumerCount === 0 && !this.manager.keepWarm(this.cameraId, this.label)) { this.state = 'idle'; return; }
 
@@ -476,6 +493,45 @@ class StreamSession {
       if (h === 'refused' && !/refused/.test(why)) why = this.lastError = friendlyError('Connection refused');
       this._backoff(why, hadPicture);
     });
+  }
+
+  /**
+   * The running pipeline is gone: tell every consumer to start afresh with
+   * whatever comes next, and remember when the picture was lost.
+   * @returns {boolean} whether there was a picture to lose
+   */
+  _dropPicture() {
+    this._broadcast(P.streamReset(), true);
+    for (const c of this.clients) c.configSent = false;
+    for (const r of this.rawConsumers) r.onReset?.();
+    const hadPicture = this.liveSince > 0;
+    if (!this.lostAt) this.lostAt = hadPicture && this.lastVideoAt ? this.lastVideoAt : Date.now();
+    this._resetCaches();
+    return hadPicture;
+  }
+
+  /* --- DVR first (sources.js) -------------------------------------------- */
+
+  /** Whether the next pipeline should play from the recorder: the source has a dvrUrl and it hasn't just failed. */
+  _useDvr() {
+    const src = this.source;
+    return !!(src && src.dvrUrl) && Date.now() >= this.noDvrUntil;
+  }
+
+  /**
+   * The recorder failed (`why`): leave it alone for a while.  A rejected
+   * login waits far longer than anything else, because recorders lock the
+   * account after a few bad logins and every stream of the room would knock.
+   */
+  _dvrFailed(why) {
+    // The messages were written for cameras, and a raw FFmpeg line can carry
+    // the address with its password; this text is shown in the camera list.
+    why = String(why).replace(/(\/\/[^:/@\s]+:)[^@/\s]*@/g, '$1***@').replace(/\bThe camera\b/g, 'The DVR').replace(/\bthe camera\b/g, 'the DVR');
+    const ms =/rejected the username/.test(why) ? DVR_AUTH_RETRY_MS : (this.manager.store.settings.ffmpeg.dvrRetryMs || 300000);
+    this.noDvrUntil = Date.now() + ms;
+    this.dvrError = why;
+    this.stats.dvrFallbacks++;
+    this.log(`DVR: ${why} — playing the camera directly; the DVR is tried again in ${ms >= 3600000 ? `${Math.round(ms / 3600000)} h` : `${Math.round(ms / 60000)} min`}`);
   }
 
   _backoff(why, hadPicture) {
@@ -565,9 +621,16 @@ class StreamSession {
     if (!p || p.exited) return;
     const ff = this.manager.store.settings.ffmpeg;
     const now = Date.now();
-    const udpTry = p.multicast || (this.source && this.source.transport === 'udp' && !this.forceTcp);
-    if (this.state === 'starting' && now - this._startedAt > (udpTry ? 8000 : 25000)) {
-      this.log(`no picture within ${udpTry ? 8 : 25} s — restarting`);
+    // A pipeline with a fallback behind it (multicast, UDP, the recorder) gets less time to show a picture.
+    const udpTry = !p.dvr && (p.multicast || (this.source && this.source.transport === 'udp' && !this.forceTcp));
+    const startLimit = p.dvr ? 10000 : udpTry ? 8000 : 25000;
+    // A recorder tried again in the background that neither plays nor gives up.
+    if (this.pending && this.pending.dvr && !this.pending.exited && now - this.pending.startedAt > 20000) {
+      this.pending.stderrTail += '\nOperation timed out';
+      this.pending.kill();
+    }
+    if (this.state === 'starting' && now - this._startedAt > startLimit) {
+      this.log(`no picture within ${startLimit / 1000} s — restarting`);
       p.stderrTail += '\nOperation timed out';
       p.kill();
     } else if (this.state === 'live' && now - this.lastVideoAt > (ff.stallTimeoutMs || 10000)) {
@@ -576,6 +639,11 @@ class StreamSession {
       p.kill();
     } else if (this.state === 'live' && ff.recycleAfterMs > 0 && !this.pending
                && now - p.startedAt > ff.recycleAfterMs) {
+      this._recycle();
+    } else if (this.state === 'live' && !this.pending && !p.dvr && this._useDvr()) {
+      // Playing the camera because the recorder failed, and its time is up:
+      // try the recorder again.  It takes over only once it shows a picture.
+      this.log('trying the DVR again');
       this._recycle();
     }
     // bitrate / fps sample
@@ -703,7 +771,7 @@ class StreamSession {
   _recycle() {
     this.log('recycling pipeline (make-before-break)');
     this.stats.recycles++;
-    const p = new Pipeline(this, { withAudio: this.active.withAudio });
+    const p = new Pipeline(this, { withAudio: this.active.withAudio, dvr: this._useDvr() });
     this.pending = p;
     this._bind(p);
     p.start().catch(() => { this.pending = null; });
@@ -752,6 +820,7 @@ class StreamSession {
       this.gop = []; this.gopRaw = []; this.gopBytes = 0;
       this._applyVideoInit(p._pendingInit.track, p._pendingInit.raw);
       if (p._pendingAudio) this._onAudioInit(p._pendingAudio);
+      if (p.dvr && !(old && old.dvr)) { this.dvrError = null; this.log('the DVR plays again — back on it'); }
       this.log('recycle complete');
     } else if (p !== this.active) return;
 
@@ -862,6 +931,8 @@ class StreamSession {
       kbps: Math.round((this._bpsSample.bps * 8) / 1000), fps: Math.round(this._bpsSample.fps * 10) / 10,
       inKbps: Math.round((this._bpsSample.inBps * 8) / 1000), multicast: !!this.active?.multicast,
       multicastWanted: this.multicastWanted,
+      // DVR first: whether the source has a recorder address, whether the picture comes from it now, and if not, why
+      dvrWanted: !!(this.source && this.source.dvrUrl), dvr: !!this.active?.dvr, dvrError: this.active?.dvr ? null : this.dvrError,
       ptsLagMs: this.ptsLagMs == null ? null : Math.round(this.ptsLagMs),
       cpuPct: this.manager.metrics?.pidCpu.get(this.active?.proc?.pid) ?? null,
       rss: this.manager.metrics?.pidRss.get(this.active?.proc?.pid) ?? null,
