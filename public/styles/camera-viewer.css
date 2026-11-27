@@ -39,7 +39,16 @@
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       background: var(--bg);
       color: var(--text);
+      /* 100vh in iPad Safari is the height with Safari's own address bar
+         hidden: 753 px on a landscape iPad that shows 678. The page was 75 px
+         taller than the screen, so it could scroll (overflow:hidden doesn't
+         stop that on iOS), and a stray swipe, a restored scroll position or a
+         tab switch slid the header and toolbar up under Safari's bar until a
+         zoom re-laid the page; the grid's bottom 75 px was always cut off.
+         100dvh is the height actually shown (Safari 15.4+); 100vh stays as
+         the fallback. */
       height: 100vh;
+      height: 100dvh;
       overflow: hidden;
       display: flex;
       flex-direction: column;
