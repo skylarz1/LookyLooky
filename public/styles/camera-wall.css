@@ -5,7 +5,7 @@
    It opens with `* { margin:0; padding:0; box-sizing:border-box }
 
 ` and a `body`
-   rule that sets height:100vh, overflow:hidden and display:flex -- loaded on a
+   rule that sets height:100dvh, overflow:hidden and display:flex -- loaded on a
    GM screen that would flatten every margin and padding panel.css sets, on
    every panel of every tab, and take the page layout with it.
 
