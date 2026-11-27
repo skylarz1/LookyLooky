@@ -262,11 +262,13 @@ camera. That takes load off cameras that struggle with several viewers.
   `rtsp://user:pass@<recorder>:554/cam/realmonitor?channel=1&subtype=1` on
   Dahua/Amcrest recorders (`subtype=0` main stream, `1` substream). Always
   played over TCP. The camera's own URL stays as it is: it is the fallback.
-- **Cost:** on four Dahua/Amcrest recorders the relay passed the video on
-  unchanged and added about 25 ms.
+- **Cost:** on six Dahua/Amcrest recorders the relay passed the video on
+  unchanged and added 22 to 35 ms.
 - **If the recorder fails** (no picture within 10 s, refused, or stalled for
   10 s while playing): the stream starts again from the camera's own URL at
-  once. Viewers see a short gap, not an error.
+  once. Viewers see a short gap, not an error. Measured against a real
+  recorder: 1 s after it drops the connection, 12 to 15 s after it freezes
+  with the connection open, about 12 s when it is silent at start-up.
 - **Going back:** every 5 minutes (`ffmpeg.dvrRetryMs`) the recorder is tried
   again in the background and takes over without a gap once it shows a
   picture. A recorder that keeps failing waits longer each time (10, 20,
