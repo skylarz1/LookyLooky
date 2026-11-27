@@ -216,9 +216,10 @@ class Pipeline extends EventEmitter {
     }
   }
 
-  kill() {
+  /** hard: no polite exit.  FFmpeg waits on a silent source before it honours SIGTERM (2 s measured). */
+  kill(hard = false) {
     if (!this.proc || this.exited) return;
-    try { this.proc.kill('SIGTERM'); } catch { /* gone */ }
+    try { this.proc.kill(hard ? 'SIGKILL' : 'SIGTERM'); } catch { /* gone */ }
     const p = this.proc;
     setTimeout(() => { if (!this.exited) try { p.kill('SIGKILL'); } catch { /* gone */ } }, 3000).unref();
   }
@@ -260,6 +261,7 @@ class StreamSession {
     this.restartTimer = null;
     this.idleTimer = null;
     this.lastVideoAt = 0;
+    this.flowAt = 0;                // last frame that followed the one before it closely (_sawVideo)
     this.liveSince = 0;
     this.stats = { bytesIn: 0, bytesOut: 0, frames: 0, skips: 0, kicks: 0, restarts: 0, recycles: 0, rtpGaps: 0, lossHolds: 0, lossHeld: 0, keyRequests: 0, dvrFallbacks: 0 };
     this.multicastLoss = [];        // times of recent RTP gaps while on multicast (_onMulticastLoss)
@@ -386,7 +388,9 @@ class StreamSession {
     if (this.state === 'idle' || this.state === 'stopped' || this.state === 'failed') return;
     if (p.needsRestart) { this._spawn(); return; }  // H.265 switching to hev1 (Pipeline._onVideoInit)
 
-    const why = friendlyError(tail) || (tail ? tail.trim().split('\n').pop() : null) || `FFmpeg exited (${signal || code})`;
+    // FFmpeg's own last line, when nothing in it is recognised (never its "Last message repeated" filler).
+    const lastLine = String(tail || '').split('\n').map((l) => l.trim()).filter((l) => l && !/^Last message repeated/i.test(l)).pop();
+    const why = friendlyError(tail) || (p.dvr && !/^The camera /.test(lastLine || '') ? 'The DVR closed the stream' : lastLine) || `FFmpeg exited (${signal || code})`;
     // No audio stream: retry immediately without the audio outputs.
     if (p.withAudio && /matches no streams|does not contain any stream/i.test(tail || '') && this.liveSince === 0) {
       this.audioAvailable = false;
@@ -539,7 +543,7 @@ class StreamSession {
     this.noDvrUntil = now + ms;
     this.dvrError = why;
     this.stats.dvrFallbacks++;
-    this.log(`DVR: ${why} — playing the camera directly; the DVR is tried again in ${ms >= 3600000 ? `${Math.round(ms / 3600000)} h` : `${Math.round(ms / 60000)} min`}`);
+    this.log(`DVR: ${why} — playing the camera directly; the DVR is tried again in ${ms >= 3600000 ? `${Math.round(ms / 3600000)} h` : ms < 60000 ? `${Math.round(ms / 1000)} s` : `${Math.round(ms / 60000)} min`}`);
   }
 
   _backoff(why, hadPicture) {
@@ -641,10 +645,12 @@ class StreamSession {
       this.log(`no picture within ${startLimit / 1000} s — restarting`);
       p.stderrTail += '\nOperation timed out';
       p.kill();
-    } else if (this.state === 'live' && now - this.lastVideoAt > (ff.stallTimeoutMs || 10000)) {
+    } else if (this.state === 'live' && now - this.lastVideoAt > 1500
+               && now - (this.flowAt || this.lastVideoAt) > (ff.stallTimeoutMs || 10000)) {
+      // (1.5 s: a stream that has just come back by itself is left alone; flowAt: see _sawVideo.)
       this.log('stalled — restarting');
       p.stderrTail += '\nThe camera stopped sending video';
-      p.kill();
+      p.kill(true);   // nothing to finish on a source that went silent
     } else if (this.state === 'live' && ff.recycleAfterMs > 0 && !this.pending
                && now - p.startedAt > ff.recycleAfterMs) {
       this._recycle();
@@ -812,10 +818,24 @@ class StreamSession {
     for (const r of this.rawConsumers) r.onInit?.(raw);
   }
 
+  /**
+   * A video frame arrived.  It counts as "video flowing" only when it follows
+   * the frame before it closely: when a source goes silent, FFmpeg lets one
+   * last queued frame out as its read times out, 10 s later, and that single
+   * frame must not start the stall clock again (measured against a frozen
+   * recorder: 20 s without a picture instead of 10).
+   */
+  _sawVideo() {
+    const now = Date.now();
+    const half = (this.manager.store.settings.ffmpeg.stallTimeoutMs || 10000) / 2;
+    if (this.state !== 'live' || now - this.lastVideoAt < half) this.flowAt = now;
+    this.lastVideoAt = now;
+  }
+
   _onVideoSample(p, pts, isKey, data, frag) {
     if (p.lossHold && this._holdAfterLoss(p, isKey)) {
       // Still arriving, so not a stall for the watchdog.
-      if (p === this.active) this.lastVideoAt = Date.now();
+      if (p === this.active) this._sawVideo();
       return;
     }
     if (p === this.pending) {
@@ -833,7 +853,7 @@ class StreamSession {
     } else if (p !== this.active) return;
 
     if (!this.videoConfigMsg) return;
-    this.lastVideoAt = Date.now();
+    this._sawVideo();
     if (this.state !== 'live') {
       this.state = 'live';
       this.liveSince = Date.now();

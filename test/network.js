@@ -281,6 +281,38 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       check('dvr: with nobody watching, a DVR failure starts nothing', calls.spawn === 0 && m.state === 'idle');
     }
     {
+      // Measured against a frozen recorder (2026-11-27): FFmpeg lets one last frame out 10 s into the
+      // silence.  That lone frame must not start the stall clock again.
+      const { m } = dvrSession();
+      let kills = 0;
+      const p = { dvr: true, exited: false, startedAt: Date.now() - 60000, stderrTail: '', kill() { kills++; } };
+      m.active = p; m.state = 'live';
+      m.lastVideoAt = m.flowAt = Date.now() - 10300;   // video flowed until 10.3 s ago
+      m._sawVideo();                                   // the lone frame
+      const flowKept = Date.now() - m.flowAt > 10000;
+      m._watchdog();
+      const early = kills;                             // just arrived: maybe the stream is coming back, wait
+      m.lastVideoAt = Date.now() - 1600;               // ... 1.6 s later nothing followed it
+      m._watchdog();
+      check('stall: one late frame after a silence does not start the stall clock again', flowKept && early === 0 && kills === 1 && /stopped sending video/.test(p.stderrTail),
+        JSON.stringify({ flowKept, early, kills }));
+      // A stream that really comes back (frames close together) is left alone.
+      kills = 0; p.stderrTail = '';
+      m.lastVideoAt = m.flowAt = Date.now() - 9000;
+      m._sawVideo(); m.lastVideoAt = Date.now() - 70; m._sawVideo();
+      m.lastVideoAt = Date.now() - 1600;
+      m._watchdog();
+      check('stall: a stream that comes back by itself is left alone', kills === 0 && Date.now() - m.flowAt < 1000, JSON.stringify({ kills }));
+      // No frame at all: as before, after stallTimeoutMs.
+      m.lastVideoAt = m.flowAt = Date.now() - 10100;
+      m._watchdog();
+      check('stall: no frame for 10 s still restarts the stream', kills === 1);
+      // A recorder that just closes the stream: the reason is a sentence, not FFmpeg's filler line.
+      const q = { dvr: true }; m.active = q; m.state = 'live'; m._spawn = () => {};
+      m._onExit(q, 1, null, 'frame=  100 fps= 15\n    Last message repeated 1 times\n');
+      check('dvr: a closed stream gives a plain reason', m.dvrError === 'The DVR closed the stream', m.dvrError);
+    }
+    {
       // The real thing, FFmpeg stood in for by node (exits at once): the DVR address first, then the camera's.
       answer = 'ok';
       const c = dvrCam(); const dl = [];
