@@ -254,6 +254,22 @@ function camera(req, body) {
     check('cameras.xml: transport="multicast" and multicast-url imported',
       c1.sources[0].transport === 'multicast' && c1.sources[0].multicastUrl === 'rtsp://h/main?mc=1' && c1.sources[1].transport === 'udp');
     check('cameras.xml: <camera-settings multicast="prefer">', parsed.settings.ffmpeg.multicast === 'prefer');
+
+    // --- a recorder (DVR/NVR): one camera per channel -----------------------
+    const { channelOf } = require('../server/onvif');
+    check('recorder: the channel is read from the stream address',
+      channelOf('rtsp://h:554/cam/realmonitor?channel=12&subtype=1') === 12 && channelOf('rtsp://h/Streaming/Channels/301') === 3
+      && channelOf('rtsp://h/Streaming/Channels/1602?x=1') === 16 && channelOf('rtsp://h/media/video2') === null);
+    const rec = (ch, sub, w, h) => ({ token: `c${ch}s${sub}`, name: sub ? 'SubStream' : 'MainStream', w, h, group: null,
+      uri: `rtsp://127.0.0.1:554/cam/realmonitor?channel=${ch}&amp;subtype=${sub}`, mc: {} });
+    // Channel 2 has the biggest main picture and channel 3 the smallest sub: neither may be suggested.
+    const saved = PROFILES.splice(0, PROFILES.length, rec(1, 0, 1920, 1080), rec(1, 1, 704, 480), rec(2, 0, 3840, 2160), rec(2, 1, 704, 480), rec(3, 0, 1920, 1080), rec(3, 1, 352, 240));
+    const r = await discover({ host: '127.0.0.1', port, user: USER, pass: PASS });
+    PROFILES.splice(0, PROFILES.length, ...saved);
+    check('recorder: every stream carries its channel', r.channels.join() === '1,2,3' && r.streams.every((s) => s.channel === Number(s.token[1])), JSON.stringify(r.streams.map((s) => [s.token, s.channel])));
+    check('recorder: main and sub are suggested from the same (first) channel',
+      /channel=1&subtype=0/.test(r.suggested.main) && /channel=1&subtype=1/.test(r.suggested.sub), `${r.suggested.main.replace(/:[^:@/]*@/, ':***@')} | ${r.suggested.sub.replace(/:[^:@/]*@/, ':***@')}`);
+    check('recorder: a single camera has one channel and is suggested as before', d.channels.join() === '1');
   } catch (err) {
     check('no exceptions', false, err.stack);
   } finally {

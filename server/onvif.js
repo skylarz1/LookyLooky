@@ -200,7 +200,19 @@ function withCredentials(uri, host, user, pass) {
 }
 
 /**
- * @returns {{streams: Array, suggested: {main, sub}}}
+ * The recorder channel a stream address belongs to, or null: `channel=3`
+ * (Dahua, Amcrest), `/Streaming/Channels/301` (Hikvision: channel 3, stream 01).
+ */
+function channelOf(uri) {
+  const s = String(uri || '');
+  let m = /[?&]channel=(\d+)/i.exec(s);
+  if (m) return Number(m[1]);
+  m = /\/Streaming\/(?:Channels|tracks)\/(\d+)(\d\d)(?:[/?]|$)/i.exec(s);
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * @returns {{streams: Array, channels: number[], suggested: {main, sub}}}
  * throws with a readable message (err.auth for credential failures)
  */
 async function discover({ host, port = 80, user = '', pass = '' }) {
@@ -221,18 +233,24 @@ async function discover({ host, port = 80, user = '', pass = '' }) {
           address: group ? group.address : null, port: group ? group.port : null,
           ttl: group ? group.ttl : null, autoStart: group ? group.autoStart : false,
         } : null;
-        streams.push({ ...p, rawUri: raw, rtspUrl: withCredentials(raw, host, user, pass), multicast });
+        streams.push({ ...p, rawUri: raw, rtspUrl: withCredentials(raw, host, user, pass), multicast, channel: channelOf(raw) });
       } catch (err) { if (err.auth) throw err; }
     }
     const seen = new Set();
     const unique = streams.filter((s) => (seen.has(s.rtspUrl) ? false : seen.add(s.rtspUrl)));
-    const byArea = [...unique].sort((a, b) => (b.width * b.height || 0) - (a.width * a.height || 0));
+    // A recorder answers with the streams of every channel, and each channel
+    // is another camera: main and sub are suggested from one channel (the
+    // first), never the biggest and the smallest picture of the whole recorder.
+    const channels = [...new Set(unique.map((s) => s.channel).filter((c) => c != null))].sort((a, b) => a - b);
+    const pool = channels.length > 1 ? unique.filter((s) => s.channel === channels[0]) : unique;
+    const byArea = [...pool].sort((a, b) => (b.width * b.height || 0) - (a.width * a.height || 0));
     const main = byArea[0]?.rtspUrl || '';
     const smallest = byArea[byArea.length - 1];
     const sub = byArea.length > 1 && smallest.rtspUrl !== main ? smallest.rtspUrl : '';
     const mcOf = (url) => (unique.find((s) => s.rtspUrl === url)?.multicast?.rtspUrl) || '';
     return {
       streams: unique,
+      channels,   // more than one: a recorder (DVR/NVR); each stream carries its `channel`
       // mainMulticast / subMulticast: the RTSP address to ask for each one as multicast ('' if none).
       suggested: { main, sub, mainMulticast: main ? mcOf(main) : '', subMulticast: sub ? mcOf(sub) : '' },
     };
@@ -390,4 +408,4 @@ function sharedGroups(entries) {
   return out;
 }
 
-module.exports = { OnvifClient, KeyframeRequester, discover, withCredentials, lookupMulticast, streamKey, sharedGroups };
+module.exports = { OnvifClient, KeyframeRequester, discover, withCredentials, lookupMulticast, streamKey, sharedGroups, channelOf };

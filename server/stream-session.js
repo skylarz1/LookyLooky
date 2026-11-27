@@ -519,7 +519,8 @@ class StreamSession {
   }
 
   /**
-   * The recorder failed (`why`): leave it alone for a while.  A rejected
+   * The recorder failed (`why`): leave it alone for a while, longer each
+   * time it fails again soon.  A rejected
    * login waits far longer than anything else, because recorders lock the
    * account after a few bad logins and every stream of the room would knock.
    */
@@ -527,8 +528,15 @@ class StreamSession {
     // The messages were written for cameras, and a raw FFmpeg line can carry
     // the address with its password; this text is shown in the camera list.
     why = String(why).replace(/(\/\/[^:/@\s]+:)[^@/\s]*@/g, '$1***@').replace(/\bThe camera\b/g, 'The DVR').replace(/\bthe camera\b/g, 'the DVR');
-    const ms =/rejected the username/.test(why) ? DVR_AUTH_RETRY_MS : (this.manager.store.settings.ffmpeg.dvrRetryMs || 300000);
-    this.noDvrUntil = Date.now() + ms;
+    // An unstable recorder must not interrupt viewers every few minutes: each
+    // failure within 3 hours doubles the wait (5, 10, 20, 40 min, at most 1 h).
+    const now = Date.now();
+    this.dvrFails = (this.dvrFails || []).filter((t) => now - t < 3 * 3600000);
+    this.dvrFails.push(now);
+    const base = this.manager.store.settings.ffmpeg.dvrRetryMs || 300000;
+    const ms = /rejected the username/.test(why) ? DVR_AUTH_RETRY_MS
+      : Math.min(Math.max(base, 3600000), base * Math.pow(2, this.dvrFails.length - 1));
+    this.noDvrUntil = now + ms;
     this.dvrError = why;
     this.stats.dvrFallbacks++;
     this.log(`DVR: ${why} — playing the camera directly; the DVR is tried again in ${ms >= 3600000 ? `${Math.round(ms / 3600000)} h` : `${Math.round(ms / 60000)} min`}`);

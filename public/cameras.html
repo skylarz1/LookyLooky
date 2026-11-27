@@ -3493,17 +3493,38 @@
     // changes.  Applied to the Manual tab's fields by Use These Streams.
     let _discoverPick = { main: '', sub: '' };
 
+    // The channels of a discovered recorder (DVR/NVR), in order; fewer than
+    // two means a single camera.  Each channel of a recorder is one camera.
+    function _discoveredChannels() {
+      const streams = window._discoveredStreams || [];
+      return [...new Set(streams.map(s => s.channel).filter(c => c != null))].sort((a, b) => a - b);
+    }
+
     function _renderDiscovered() {
       const streams = window._discoveredStreams || [];
+      const recorder = _discoveredChannels().length > 1;
+      const mainCh = streams.find(s => s.rtspUrl === _discoverPick.main)?.channel;
+      // A recorder's streams are shown channel by channel, each under its heading.
+      const order = streams.map((s, i) => i);
+      if (recorder) order.sort((a, b) => (streams[a].channel ?? 1e9) - (streams[b].channel ?? 1e9) || a - b);
+      let lastCh;
       document.getElementById('discoverResults').innerHTML =
         '<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px;">' +
-          'Main and sub were chosen by resolution. Click a stream to make it main; Sub picks the substream.</div>' +
-        streams.map((s, i) => {
+          (recorder
+            ? `This is a recorder with ${_discoveredChannels().length} channels, and each channel is one camera. Click the main stream of the camera you want: its substream is taken from the same channel. Add the other channels as cameras of their own.`
+            : 'Main and sub were chosen by resolution. Click a stream to make it main; Sub picks the substream.') + '</div>' +
+        order.map((i) => {
+          const s = streams[i];
           const isMain = s.rtspUrl === _discoverPick.main;
           const isSub  = s.rtspUrl === _discoverPick.sub;
-          return `
+          const heading = recorder && s.channel !== lastCh
+            ? `<div style="font-size:12px;font-weight:600;margin:10px 0 4px;">${s.channel == null ? 'Other streams' : `Channel ${s.channel}`}${s.channel === mainCh && s.channel != null ? ' — selected' : ''}</div>` : '';
+          lastCh = s.channel;
+          // On a recorder the substream has to come from the main stream's channel: another channel is another camera.
+          const subOk = !isMain && (!recorder || s.channel === mainCh);
+          return heading + `
             <div class="discover-card${isMain ? ' selected' : ''}" onclick="selectDiscoveredStream(${i})" id="disc-${i}">
-              ${isMain ? '' : `<button class="btn discover-sub-btn" onclick="event.stopPropagation();selectDiscoveredSub(${i})">${isSub ? 'No Sub' : 'Sub'}</button>`}
+              ${subOk ? `<button class="btn discover-sub-btn" onclick="event.stopPropagation();selectDiscoveredSub(${i})">${isSub ? 'No Sub' : 'Sub'}</button>` : ''}
               <div class="profile-name">${_scanEsc(s.profileName)}
                 <span class="profile-size">${s.width ? `${s.width}×${s.height}` : ''}</span>
                 ${isMain ? '<span class="discover-role">Main</span>' : ''}${isSub ? '<span class="discover-role">Sub</span>' : ''}
@@ -3520,12 +3541,20 @@
       if (!s) return;
       _discoverPick.main = s.rtspUrl;
       if (_discoverPick.sub === s.rtspUrl) _discoverPick.sub = '';
+      if (_discoveredChannels().length > 1) {
+        // A recorder: the substream follows the main stream to its channel
+        // (the smallest other picture there), so the two are the same camera.
+        const same = window._discoveredStreams.filter(x => x.channel === s.channel && x.rtspUrl !== s.rtspUrl)
+          .sort((a, b) => (a.width * a.height || 0) - (b.width * b.height || 0));
+        _discoverPick.sub = same[0]?.rtspUrl || '';
+      }
       _renderDiscovered();
     }
 
     function selectDiscoveredSub(index) {
       const s = window._discoveredStreams?.[index];
       if (!s || s.rtspUrl === _discoverPick.main) return;
+      if (_discoveredChannels().length > 1 && s.channel !== window._discoveredStreams.find(x => x.rtspUrl === _discoverPick.main)?.channel) return;
       _discoverPick.sub = _discoverPick.sub === s.rtspUrl ? '' : s.rtspUrl;
       _renderDiscovered();
     }
@@ -3555,7 +3584,8 @@
       // like "MainStream", which says nothing about which camera this is.
       if (!document.getElementById('camName').value) {
         const host = document.getElementById('discoverHost').value.trim();
-        document.getElementById('camName').value = `Camera ${host.split('.').pop()}`;
+        const ch = _discoveredChannels().length > 1 ? streams.find(s => s.rtspUrl === _discoverPick.main)?.channel : null;
+        document.getElementById('camName').value = `Camera ${host.split('.').pop()}${ch != null ? ` channel ${ch}` : ''}`;
       }
       setAddTab('manual', document.getElementById('addTabs').querySelector('.btn'));
     }

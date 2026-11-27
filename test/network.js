@@ -254,6 +254,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       const again = { dvr: true }; m.pending = again;
       m._onExit(again, 1, null, 'Connection refused');
       check('dvr: a failed retry leaves the camera stream alone and waits again', m.pending === null && m.active === cam2 && m.noDvrUntil > Date.now() + 299000 && calls.spawn === 1 && m.stats.dvrFallbacks === 2);
+      const second = m.noDvrUntil - Date.now();
+      for (let i = 0; i < 6; i++) m._dvrFailed('Connection refused');
+      const capped = m.noDvrUntil - Date.now();
+      check('dvr: an unstable DVR waits longer each time (10 min after the second failure), at most an hour', second > 599000 && second <= 600000 && capped > 3599000 && capped <= 3600000, `${second} ms, then ${capped} ms`);
+      m.stats.dvrFallbacks = 2;
       // A retry that only has to start again as hev1 is not a failure.
       m.noDvrUntil = 0; const hev = { dvr: true, needsRestart: true }; m.pending = hev;
       m._onExit(hev, 0, null, '');

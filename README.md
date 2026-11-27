@@ -269,7 +269,9 @@ camera. That takes load off cameras that struggle with several viewers.
   once. Viewers see a short gap, not an error.
 - **Going back:** every 5 minutes (`ffmpeg.dvrRetryMs`) the recorder is tried
   again in the background and takes over without a gap once it shows a
-  picture. After the recorder **rejected the login**, the next try is 24 hours
+  picture. A recorder that keeps failing waits longer each time (10, 20,
+  40 minutes, at most an hour), so an unstable one does not interrupt
+  viewers every few minutes. After the recorder **rejected the login**, the next try is 24 hours
   later (or when the camera is edited): recorders lock an account after a few
   bad logins.
 - **Saving:** a DVR address that does not play fails the stream test, even
@@ -278,6 +280,9 @@ camera. That takes load off cameras that struggle with several viewers.
   *camera, not DVR* (hover for the reason); `/api/stats` has `dvr`,
   `dvrWanted`, `dvrError` and `dvrFallbacks` per stream.
 - **API / cameras.xml:** `dvrUrl` per source; `dvr-url="rtsp://…"` in the XML.
+- **ONVIF Discover on a recorder** lists its streams channel by channel
+  (each channel is one camera) and keeps main and sub on the same channel.
+  Use it to read off a channel's addresses for the DVR fields.
 
 Recordings and ONVIF keyframe requests still go to the camera itself.
 
