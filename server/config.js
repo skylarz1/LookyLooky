@@ -42,6 +42,10 @@ const DEFAULT_SETTINGS = {
     // ... and ask the camera for a keyframe right away over ONVIF, while
     // somebody is watching, so that freeze ends sooner (onvif.js KeyframeRequester).
     keyframeOnLoss: true,
+    // A source with a dvrUrl plays from the recorder first (sources.js).  After
+    // the recorder fails, the camera is played directly and the recorder is
+    // tried again this often.
+    dvrRetryMs: 300000,
   },
   webcodecs: {
     bufferMs: 150,
@@ -159,6 +163,9 @@ function normaliseSource(s, fallbackLabel) {
   // Stay on multicast when it loses packets or stalls (stream-session.js), for
   // cameras that cope badly with extra unicast streams.
   if (s.keepMulticast) out.keepMulticast = true;
+  // The same stream as the camera's recorder (DVR/NVR) relays it: played first,
+  // with `url` as the fallback when the recorder fails (sources.js "DVR first").
+  if (s.dvrUrl && /^rtsps?:\/\//i.test(String(s.dvrUrl).trim()) && String(s.dvrUrl).trim() !== out.url) out.dvrUrl = String(s.dvrUrl).trim();
   if (out.type !== sourceType(out.url) && !['rtsp', 'http', 'rtmp', 'test', 'file'].includes(out.type)) out.type = sourceType(out.url);
   if (s.transcode) out.transcode = true;
   if (s.params && typeof s.params === 'object') out.params = { ...s.params };
@@ -268,7 +275,7 @@ function parseCamerasXml(text) {
     let s;
     while ((s = srcRe.exec(m[3] || ''))) {
       const sa = xmlAttrs(s[1]);
-      if (sa.url) sources.push({ label: sa.label || (sources.length ? 'sub' : 'main'), url: sa.url, transport: sa.transport, type: sa.type, multicastUrl: sa['multicast-url'] });
+      if (sa.url) sources.push({ label: sa.label || (sources.length ? 'sub' : 'main'), url: sa.url, transport: sa.transport, type: sa.type, multicastUrl: sa['multicast-url'], dvrUrl: sa['dvr-url'] });
     }
     if (!sources.length && a.source) sources.push({ label: 'main', url: a.source });
     const id = slugify(a['camera-id'] || a.id || a.name);

@@ -76,7 +76,10 @@ function register(router, ctx) {
     return Promise.all(cam.sources.map(async (src) => {
       const r = await probe(src, store.settings, { key: `${cam.id}/${src.label}`, timeoutMs: 12000 });
       if (r.ok) manager.updateVariant(cam.id, src.label, { ...r, probedAt: Date.now() });
-      return { label: src.label, ok: r.ok, error: r.error || null, note: r.note || null, multicast: !!r.multicast, width: r.width || null, height: r.height || null, videoCodec: r.videoCodec || null, audioCodec: r.audioCodec || null };
+      // A DVR address that doesn't play fails the test even when the camera
+      // itself does: the stream would run, but never from the recorder.
+      if (r.dvrError) return { label: src.label, ok: false, error: `DVR address: ${r.dvrError}${r.ok ? ' (the camera itself plays)' : ''}`, note: r.note || null, multicast: false, dvr: false, width: r.width || null, height: r.height || null, videoCodec: r.videoCodec || null, audioCodec: r.audioCodec || null };
+      return { label: src.label, ok: r.ok, error: r.error || null, note: r.note || null, multicast: !!r.multicast, dvr: !!r.dvr, width: r.width || null, height: r.height || null, videoCodec: r.videoCodec || null, audioCodec: r.audioCodec || null };
     }));
   }
 
@@ -167,7 +170,7 @@ function register(router, ctx) {
     const key = item.key || item.ip;
     const transport = ['udp', 'multicast'].includes(item.transport) ? item.transport : 'tcp';
     let sources = Array.isArray(item.sources) && item.sources.length
-      ? item.sources.map((s) => ({ label: s.label, url: s.url, transport: s.transport || transport, multicastUrl: s.multicastUrl })) : null;
+      ? item.sources.map((s) => ({ label: s.label, url: s.url, transport: s.transport || transport, multicastUrl: s.multicastUrl, dvrUrl: s.dvrUrl })) : null;
     let note = null;
     if (!sources && item.user) {
       emit('item', { key, stage: 'discovering' });

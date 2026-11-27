@@ -39,7 +39,8 @@ server/ws-server.js       /cameras/stream: subscribe {cameraId, quality, audio:'
 server/mjpeg.js           thumbnails/MJPEG/snapshots decoded from the running session's fMP4 (no extra camera connection)
 server/cameras.js         camera list/status, sessions, keep-warm, recycle, stray reaping, probing
 server/api.js             REST API (see README)    server/config.js  persistence, defaults, XML/JSON import parsers
-server/sources.js         FFmpeg input args per URL type (incl. RTSP multicast + its fallback memory), HTTP session-cookie
+server/sources.js         FFmpeg input args per URL type (incl. RTSP multicast + its fallback memory, and "DVR first": a
+                          source's dvrUrl is played before the camera, StreamSession falls back and retries), HTTP session-cookie
                           login, friendly error messages
 server/onvif.js           ONVIF discovery (stream URIs, multicast URIs and groups), lookupMulticast for existing cameras,
                           KeyframeRequester (a keyframe from the camera after packet loss)
@@ -60,7 +61,7 @@ test/e2e.js               browser smoke test     test/features.js  multi-audio, 
 test/onvif.js             fake ONVIF camera: multicast discovery/lookup, keyframe requests, FFmpeg args, fallback memory
                           (no instance needed)
 test/network.js           unreachable cameras: the TCP knock, STREAM_PROBLEM, wait-then-restart; packet loss: held frames,
-                          keyframe requests, loss history (no instance needed)
+                          keyframe requests, loss history; DVR first: fallback to the camera and the retry (no instance needed)
 ```
 
 ## Rules

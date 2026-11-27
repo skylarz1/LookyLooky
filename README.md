@@ -250,6 +250,44 @@ Pipeline settings (Settings → Streaming):
 back in. A UDP stream that shows no picture within about 8 s switches itself
 to TCP. To really use UDP, run with `network_mode: host` on Linux.
 
+### DVR first
+
+A camera that is also recorded by a DVR/NVR is already being pulled by that
+recorder, and most recorders relay each channel over RTSP. Give a camera's
+stream a **DVR address** (camera dialog → *DVR addresses*) and LookyLooky
+plays it from the recorder instead of opening its own connection to the
+camera. That takes load off cameras that struggle with several viewers.
+
+- **Address:** the recorder's RTSP URL for that camera's channel, for example
+  `rtsp://user:pass@<recorder>:554/cam/realmonitor?channel=1&subtype=1` on
+  Dahua/Amcrest recorders (`subtype=0` main stream, `1` substream). Always
+  played over TCP. The camera's own URL stays as it is: it is the fallback.
+- **Cost:** on six Dahua/Amcrest recorders the relay passed the video on
+  unchanged and added 22 to 35 ms.
+- **If the recorder fails** (no picture within 10 s, refused, or stalled for
+  10 s while playing): the stream starts again from the camera's own URL at
+  once. Viewers see a short gap, not an error. Measured against a real
+  recorder: 1 s after it drops the connection, 12 to 15 s after it freezes
+  with the connection open, about 12 s when it is silent at start-up.
+- **Going back:** every 5 minutes (`ffmpeg.dvrRetryMs`) the recorder is tried
+  again in the background and takes over without a gap once it shows a
+  picture. A recorder that keeps failing waits longer each time (10, 20,
+  40 minutes, at most an hour), so an unstable one does not interrupt
+  viewers every few minutes. After the recorder **rejected the login**, the next try is 24 hours
+  later (or when the camera is edited): recorders lock an account after a few
+  bad logins.
+- **Saving:** a DVR address that does not play fails the stream test, even
+  when the camera itself plays; *Save anyway* keeps it.
+- **Where it shows:** the Statistics page lists each stream as *DVR* or
+  *camera, not DVR* (hover for the reason); `/api/stats` has `dvr`,
+  `dvrWanted`, `dvrError` and `dvrFallbacks` per stream.
+- **API / cameras.xml:** `dvrUrl` per source; `dvr-url="rtsp://…"` in the XML.
+- **ONVIF Discover on a recorder** lists its streams channel by channel
+  (each channel is one camera) and keeps main and sub on the same channel.
+  Use it to read off a channel's addresses for the DVR fields.
+
+Recordings and ONVIF keyframe requests still go to the camera itself.
+
 ### Multicast
 
 With RTSP multicast, a camera sends each stream **once** onto the network,

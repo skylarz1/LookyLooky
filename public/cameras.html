@@ -957,6 +957,12 @@
           <div class="mc-hint">Multicast only reaches LookyLooky when its container is on the cameras' network (Linux, <code>network_mode: host</code>). On Docker Desktop it can't arrive, and the stream falls back to TCP after about 8 seconds.</div>
         </div>
         <div class="form-group">
+          <label>DVR addresses <span style="font-size:11px;color:var(--text-dim);">(optional — the same streams as this camera's recorder relays them. Empty = always the camera.)</span></label>
+          <input id="camDvrUrl" placeholder="Main stream from the DVR, e.g. rtsp://user:pass@dvr-address:554/cam/realmonitor?channel=1&amp;subtype=0" style="margin-bottom:6px;" />
+          <input id="camSubDvrUrl" placeholder="Substream from the DVR, e.g. …channel=1&amp;subtype=1" />
+          <div class="mc-hint">With a DVR address the stream plays from the recorder, which already has the camera's video, so LookyLooky adds no load to the camera. If the recorder stops, the stream switches to the camera's own URL above within seconds, and goes back to the recorder once it plays again (tried every 5 minutes).</div>
+        </div>
+        <div class="form-group">
           <label>Video <span style="font-size:11px;color:var(--text-dim);">(convert only for cameras browsers cannot decode — MJPEG/MPEG-4 cameras, or HEVC for browsers without it)</span></label>
           <select id="camTranscode">
             <option value="">Pass through (no added latency, no CPU)</option>
@@ -2648,6 +2654,8 @@
       document.getElementById('camTranscode').value = '';
       document.getElementById('camMcUrl').value = '';
       document.getElementById('camSubMcUrl').value = '';
+      document.getElementById('camDvrUrl').value = '';
+      document.getElementById('camSubDvrUrl').value = '';
       document.getElementById('camKeepMc').checked = false;
       document.getElementById('camMulticastHint').style.display = 'none';
       _editSources = [];
@@ -2703,8 +2711,10 @@
             document.getElementById('camMcUrl').value = mainSrc.multicastUrl || '';
             document.getElementById('camKeepMc').checked = !!mainSrc.keepMulticast;
           }
+          document.getElementById('camDvrUrl').value = mainSrc?.dvrUrl || '';
           document.getElementById('camSubUrl').value = subSrc?.url || '';
           document.getElementById('camSubMcUrl').value = subSrc?.multicastUrl || '';
+          document.getElementById('camSubDvrUrl').value = subSrc?.dvrUrl || '';
           syncMulticastRow();
           const urlsEl = document.getElementById('modalStreamUrls');
           urlsEl.innerHTML = buildStreamUrlsForModal(editId, full);
@@ -2769,9 +2779,11 @@
       const mcUrl    = document.getElementById('camMcUrl').value.trim();
       const subMcUrl = document.getElementById('camSubMcUrl').value.trim();
       const keepMulticast = transport === 'multicast' && document.getElementById('camKeepMc').checked;
+      const dvrUrl    = document.getElementById('camDvrUrl').value.trim();
+      const subDvrUrl = document.getElementById('camSubDvrUrl').value.trim();
       const sources = [];
-      if (mainUrl) sources.push({ ...kept('main', mainUrl), label: 'main', url: mainUrl, transport, ...(transcode ? { transcode } : {}), ...(mcUrl ? { multicastUrl: mcUrl } : {}), ...(keepMulticast ? { keepMulticast } : {}) });
-      if (subUrl)  sources.push({ ...kept('sub', subUrl), label: 'sub',  url: subUrl,  transport, ...(transcode ? { transcode } : {}), ...(subMcUrl ? { multicastUrl: subMcUrl } : {}), ...(keepMulticast ? { keepMulticast } : {}) });
+      if (mainUrl) sources.push({ ...kept('main', mainUrl), label: 'main', url: mainUrl, transport, ...(transcode ? { transcode } : {}), ...(mcUrl ? { multicastUrl: mcUrl } : {}), ...(keepMulticast ? { keepMulticast } : {}), ...(dvrUrl ? { dvrUrl } : {}) });
+      if (subUrl)  sources.push({ ...kept('sub', subUrl), label: 'sub',  url: subUrl,  transport, ...(transcode ? { transcode } : {}), ...(subMcUrl ? { multicastUrl: subMcUrl } : {}), ...(keepMulticast ? { keepMulticast } : {}), ...(subDvrUrl ? { dvrUrl: subDvrUrl } : {}) });
 
       const cam = {
         id: document.getElementById('camId').value.trim(),
@@ -3481,17 +3493,38 @@
     // changes.  Applied to the Manual tab's fields by Use These Streams.
     let _discoverPick = { main: '', sub: '' };
 
+    // The channels of a discovered recorder (DVR/NVR), in order; fewer than
+    // two means a single camera.  Each channel of a recorder is one camera.
+    function _discoveredChannels() {
+      const streams = window._discoveredStreams || [];
+      return [...new Set(streams.map(s => s.channel).filter(c => c != null))].sort((a, b) => a - b);
+    }
+
     function _renderDiscovered() {
       const streams = window._discoveredStreams || [];
+      const recorder = _discoveredChannels().length > 1;
+      const mainCh = streams.find(s => s.rtspUrl === _discoverPick.main)?.channel;
+      // A recorder's streams are shown channel by channel, each under its heading.
+      const order = streams.map((s, i) => i);
+      if (recorder) order.sort((a, b) => (streams[a].channel ?? 1e9) - (streams[b].channel ?? 1e9) || a - b);
+      let lastCh;
       document.getElementById('discoverResults').innerHTML =
         '<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px;">' +
-          'Main and sub were chosen by resolution. Click a stream to make it main; Sub picks the substream.</div>' +
-        streams.map((s, i) => {
+          (recorder
+            ? `This is a recorder with ${_discoveredChannels().length} channels, and each channel is one camera. Click the main stream of the camera you want: its substream is taken from the same channel. Add the other channels as cameras of their own.`
+            : 'Main and sub were chosen by resolution. Click a stream to make it main; Sub picks the substream.') + '</div>' +
+        order.map((i) => {
+          const s = streams[i];
           const isMain = s.rtspUrl === _discoverPick.main;
           const isSub  = s.rtspUrl === _discoverPick.sub;
-          return `
+          const heading = recorder && s.channel !== lastCh
+            ? `<div style="font-size:12px;font-weight:600;margin:10px 0 4px;">${s.channel == null ? 'Other streams' : `Channel ${s.channel}`}${s.channel === mainCh && s.channel != null ? ' — selected' : ''}</div>` : '';
+          lastCh = s.channel;
+          // On a recorder the substream has to come from the main stream's channel: another channel is another camera.
+          const subOk = !isMain && (!recorder || s.channel === mainCh);
+          return heading + `
             <div class="discover-card${isMain ? ' selected' : ''}" onclick="selectDiscoveredStream(${i})" id="disc-${i}">
-              ${isMain ? '' : `<button class="btn discover-sub-btn" onclick="event.stopPropagation();selectDiscoveredSub(${i})">${isSub ? 'No Sub' : 'Sub'}</button>`}
+              ${subOk ? `<button class="btn discover-sub-btn" onclick="event.stopPropagation();selectDiscoveredSub(${i})">${isSub ? 'No Sub' : 'Sub'}</button>` : ''}
               <div class="profile-name">${_scanEsc(s.profileName)}
                 <span class="profile-size">${s.width ? `${s.width}×${s.height}` : ''}</span>
                 ${isMain ? '<span class="discover-role">Main</span>' : ''}${isSub ? '<span class="discover-role">Sub</span>' : ''}
@@ -3508,12 +3541,20 @@
       if (!s) return;
       _discoverPick.main = s.rtspUrl;
       if (_discoverPick.sub === s.rtspUrl) _discoverPick.sub = '';
+      if (_discoveredChannels().length > 1) {
+        // A recorder: the substream follows the main stream to its channel
+        // (the smallest other picture there), so the two are the same camera.
+        const same = window._discoveredStreams.filter(x => x.channel === s.channel && x.rtspUrl !== s.rtspUrl)
+          .sort((a, b) => (a.width * a.height || 0) - (b.width * b.height || 0));
+        _discoverPick.sub = same[0]?.rtspUrl || '';
+      }
       _renderDiscovered();
     }
 
     function selectDiscoveredSub(index) {
       const s = window._discoveredStreams?.[index];
       if (!s || s.rtspUrl === _discoverPick.main) return;
+      if (_discoveredChannels().length > 1 && s.channel !== window._discoveredStreams.find(x => x.rtspUrl === _discoverPick.main)?.channel) return;
       _discoverPick.sub = _discoverPick.sub === s.rtspUrl ? '' : s.rtspUrl;
       _renderDiscovered();
     }
@@ -3543,7 +3584,8 @@
       // like "MainStream", which says nothing about which camera this is.
       if (!document.getElementById('camName').value) {
         const host = document.getElementById('discoverHost').value.trim();
-        document.getElementById('camName').value = `Camera ${host.split('.').pop()}`;
+        const ch = _discoveredChannels().length > 1 ? streams.find(s => s.rtspUrl === _discoverPick.main)?.channel : null;
+        document.getElementById('camName').value = `Camera ${host.split('.').pop()}${ch != null ? ` channel ${ch}` : ''}`;
       }
       setAddTab('manual', document.getElementById('addTabs').querySelector('.btn'));
     }
@@ -3669,12 +3711,18 @@
         .sort((a, b) => b[1] - a[1])
         .map(([codec, n]) => `${n} × ${codec}`)
         .join(', ') || 'none';
-      // How the running streams arrive, once any run over multicast.
-      let mc = 0, uni = 0;
+      // How the running streams arrive, once any run over multicast or from a
+      // recorder; and how many that should come from their recorder do not.
+      let mc = 0, uni = 0, dvr = 0, dvrOff = 0;
       for (const cam of cams || []) for (const v of cam.variants || []) {
-        if (v.delivery === 'multicast') mc++; else if (v.delivery === 'unicast') uni++;
+        if (v.delivery === 'dvr') dvr++; else if (v.delivery === 'multicast') mc++; else if (v.delivery === 'unicast') uni++;
+        if (v.dvrWanted && v.delivery && v.delivery !== 'dvr') dvrOff++;
       }
-      const delivery = mc ? ` · Running: ${mc} multicast, ${uni} unicast` : '';
+      const parts = [];
+      if (dvr || dvrOff) parts.push(`${dvr} from a DVR`);
+      if (mc) parts.push(`${mc} multicast`);
+      if (parts.length) parts.push(`${uni} direct unicast${dvrOff ? ` (${dvrOff} of them because their DVR is not playing)` : ''}`);
+      const delivery = parts.length ? ` · Running: ${parts.join(', ')}` : '';
       return `Codecs — Sub-streams: ${fmt(tally.sub)} · Main-streams: ${fmt(tally.main)}${delivery}`;
     }
 

@@ -208,7 +208,137 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     lt += 25 * HOUR;
     check('loss history: a file with only old rows starts empty', new LossLog(lm, { ...io, read: () => ({ rows: log.rows }) }).rows.length === 0);
 
-    check('keepMulticast survives normaliseCamera', normaliseCamera({ id: 'k', name: 'K', sources: [{ url: 'rtsp://h/x', transport: 'multicast', keepMulticast: true }] }).sources[0].keepMulticast === true);
+    // --- DVR first: the recorder's relay, with the camera as the fallback -----
+    const dvrCam = () => ({ id: 'd', name: 'D', enabled: true, sources: [{ label: 'sub', type: 'rtsp', url: 'rtsp://192.0.2.9/cam', transport: 'tcp', dvrUrl: 'rtsp://192.0.2.8/dvr?channel=1' }] });
+    const nd = normaliseCamera({ id: 'n', name: 'N', sources: [
+      { label: 'main', url: 'rtsp://h/x', dvrUrl: ' rtsp://dvr/1 ' }, { label: 'sub', url: 'rtsp://h/y', dvrUrl: 'rtsp://h/y' }] });
+    check('dvr: dvrUrl survives normaliseCamera, trimmed; one equal to the camera URL is dropped', nd.sources[0].dvrUrl === 'rtsp://dvr/1' && nd.sources[1].dvrUrl === undefined, JSON.stringify(nd.sources));
+    check('dvr: a dvrUrl that is not RTSP is dropped', normaliseCamera({ id: 'n2', name: 'N', sources: [{ url: 'rtsp://h/x', dvrUrl: 'http://dvr/1' }] }).sources[0].dvrUrl === undefined);
+    const viaDvr = await sources.inputArgs(dvrCam().sources[0], settings, { dvr: true });
+    const viaCam = await sources.inputArgs(dvrCam().sources[0], settings, {});
+    check('dvr: input is the DVR address over TCP when asked for, the camera otherwise',
+      viaDvr.dvr === true && viaDvr.args.includes('rtsp://192.0.2.8/dvr?channel=1') && viaDvr.args[viaDvr.args.indexOf('-rtsp_transport') + 1] === 'tcp'
+      && !viaCam.dvr && viaCam.args.includes('rtsp://192.0.2.9/cam'), JSON.stringify([viaDvr.args, viaCam.args]));
+    check('dvr: a source without a dvrUrl ignores the request', !(await sources.inputArgs({ type: 'rtsp', url: 'rtsp://192.0.2.9/cam' }, settings, { dvr: true })).dvr);
+    const dvrSession = (keepWarm = true) => {
+      const c = dvrCam();
+      const m = new StreamSession({ ...fake, camera: () => c, keepWarm: () => keepWarm }, 'd', 'sub');
+      clearInterval(m.watchdog);
+      m.log = () => {};
+      const calls = { spawn: 0, recycle: 0 };
+      m._spawn = () => { calls.spawn++; }; m._recycle = () => { calls.recycle++; };
+      return { m, calls };
+    };
+    {
+      const { m, calls } = dvrSession();
+      const wanted = m._useDvr();
+      const sent = [];
+      m.clients.add({ configSent: true, send: (b) => sent.push(b[1]) });
+      const p = { dvr: true }; m.active = p; m.state = 'live'; m.liveSince = Date.now() - 5000; m.lastVideoAt = Date.now();
+      m._onExit(p, 1, null, 'The camera stopped sending video');
+      check('dvr: wanted first; after the DVR stalls the camera is started at once, not counted as a restart',
+        wanted && calls.spawn === 1 && !m._useDvr() && m.restarts.length === 0 && m.stats.restarts === 0 && m.stats.dvrFallbacks === 1,
+        JSON.stringify({ wanted, calls, restarts: m.restarts.length, stats: m.stats.dvrFallbacks }));
+      const wait = m.noDvrUntil - Date.now();
+      check('dvr: the DVR is left alone for dvrRetryMs (5 min)', wait > 299000 && wait <= 300000, `${wait} ms`);
+      check('dvr: viewers are told to start afresh, and the reason is kept', sent.includes(0x06) && /stopped sending video/.test(m.dvrError), JSON.stringify({ sent, why: m.dvrError }));
+      check('dvr: info() says the camera is played and why', m.info().dvrWanted === true && m.info().dvr === false && /stopped sending video/.test(m.info().dvrError));
+      // On the camera now.  Nothing happens until the wait is over; then a make-before-break try.
+      const cam2 = { dvr: false, exited: false, startedAt: Date.now() }; m.active = cam2; m.state = 'live'; m.lastVideoAt = Date.now();
+      m._watchdog();
+      const early = calls.recycle;
+      m.noDvrUntil = Date.now() - 1; m.lastVideoAt = Date.now();
+      m._watchdog();
+      check('dvr: tried again only once its time is up, without stopping the camera stream', early === 0 && calls.recycle === 1 && m.active === cam2, JSON.stringify({ early, calls }));
+      // That try exits without a picture: stay on the camera, wait again.
+      const again = { dvr: true }; m.pending = again;
+      m._onExit(again, 1, null, 'Connection refused');
+      check('dvr: a failed retry leaves the camera stream alone and waits again', m.pending === null && m.active === cam2 && m.noDvrUntil > Date.now() + 299000 && calls.spawn === 1 && m.stats.dvrFallbacks === 2);
+      const second = m.noDvrUntil - Date.now();
+      for (let i = 0; i < 6; i++) m._dvrFailed('Connection refused');
+      const capped = m.noDvrUntil - Date.now();
+      check('dvr: an unstable DVR waits longer each time (10 min after the second failure), at most an hour', second > 599000 && second <= 600000 && capped > 3599000 && capped <= 3600000, `${second} ms, then ${capped} ms`);
+      m.stats.dvrFallbacks = 2;
+      // A retry that only has to start again as hev1 is not a failure.
+      m.noDvrUntil = 0; const hev = { dvr: true, needsRestart: true }; m.pending = hev;
+      m._onExit(hev, 0, null, '');
+      check('dvr: a retry restarting for H.265 parameter sets is not held against the DVR', m._useDvr() && m.stats.dvrFallbacks === 2);
+    }
+    {
+      const { m } = dvrSession();
+      const p = { dvr: true }; m.active = p; m.state = 'starting';
+      m._onExit(p, 1, null, 'method DESCRIBE failed: 401 Unauthorized');
+      const hours = (m.noDvrUntil - Date.now()) / 3600000;
+      check('dvr: a rejected login is not tried again for 24 h (recorders lock accounts)', hours > 23.9 && hours <= 24, `${hours.toFixed(2)} h`);
+      check('dvr: the reason names the DVR, not the camera', m.dvrError === 'The DVR rejected the username or password', m.dvrError);
+      m._dvrFailed('rtsp://admin:secret@192.0.2.8:554/dvr: Server returned 5XX Server Error reply');
+      check('dvr: a password in the reason is masked', !/secret/.test(m.dvrError) && /admin:\*\*\*@192\.0\.2\.8/.test(m.dvrError), m.dvrError);
+    }
+    {
+      const { m, calls } = dvrSession(false);
+      const p = { dvr: true }; m.active = p; m.state = 'starting';
+      m._onExit(p, 1, null, 'Connection refused');
+      check('dvr: with nobody watching, a DVR failure starts nothing', calls.spawn === 0 && m.state === 'idle');
+    }
+    {
+      // Measured against a frozen recorder (2026-11-27): FFmpeg lets one last frame out 10 s into the
+      // silence.  That lone frame must not start the stall clock again.
+      const { m } = dvrSession();
+      let kills = 0;
+      const p = { dvr: true, exited: false, startedAt: Date.now() - 60000, stderrTail: '', kill() { kills++; } };
+      m.active = p; m.state = 'live';
+      m.lastVideoAt = m.flowAt = Date.now() - 10300;   // video flowed until 10.3 s ago
+      m._sawVideo();                                   // the lone frame
+      const flowKept = Date.now() - m.flowAt > 10000;
+      m._watchdog();
+      const early = kills;                             // just arrived: maybe the stream is coming back, wait
+      m.lastVideoAt = Date.now() - 1600;               // ... 1.6 s later nothing followed it
+      m._watchdog();
+      check('stall: one late frame after a silence does not start the stall clock again', flowKept && early === 0 && kills === 1 && /stopped sending video/.test(p.stderrTail),
+        JSON.stringify({ flowKept, early, kills }));
+      // A stream that really comes back (frames close together) is left alone.
+      kills = 0; p.stderrTail = '';
+      m.lastVideoAt = m.flowAt = Date.now() - 9000;
+      m._sawVideo(); m.lastVideoAt = Date.now() - 70; m._sawVideo();
+      m.lastVideoAt = Date.now() - 1600;
+      m._watchdog();
+      check('stall: a stream that comes back by itself is left alone', kills === 0 && Date.now() - m.flowAt < 1000, JSON.stringify({ kills }));
+      // No frame at all: as before, after stallTimeoutMs.
+      m.lastVideoAt = m.flowAt = Date.now() - 10100;
+      m._watchdog();
+      check('stall: no frame for 10 s still restarts the stream', kills === 1);
+      // A recorder that just closes the stream: the reason is a sentence, not FFmpeg's filler line.
+      const q = { dvr: true }; m.active = q; m.state = 'live'; m._spawn = () => {};
+      m._onExit(q, 1, null, 'frame=  100 fps= 15\n    Last message repeated 1 times\n');
+      check('dvr: a closed stream gives a plain reason', m.dvrError === 'The DVR closed the stream', m.dvrError);
+    }
+    {
+      // The real thing, FFmpeg stood in for by node (exits at once): the DVR address first, then the camera's.
+      answer = 'ok';
+      const c = dvrCam(); const dl = [];
+      const m = new StreamSession({ ...fake, camera: () => c }, 'd', 'sub');
+      m.log = (msg) => dl.push(msg);
+      m.addClient({ configSent: false, send() {}, sendConfig() {}, detach() {} });
+      await sleep(1500);
+      const spawns = dl.filter((l) => l.startsWith('spawn'));
+      check('dvr: a stream starts from the DVR address, then falls back to the camera address',
+        /192\.0\.2\.8\/dvr.*\(DVR\)/.test(spawns[0] || '') && /192\.0\.2\.9\/cam/.test(spawns[1] || '') && !/\(DVR\)/.test(spawns[1] || '')
+        && dl.some((l) => /^DVR: .*playing the camera directly; the DVR is tried again in 5 min/.test(l)), dl.slice(0, 6).join(' | '));
+      m.destroy();
+    }
+    {
+      const { CameraManager: CM } = require('../server/cameras');
+      const mgr2 = new CM({ settings: DEFAULT_SETTINGS, cameras: [dvrCam()] });
+      const sessLive = (dvr) => ({ active: { dvr, multicast: false }, state: 'live', dvrError: dvr ? null : 'The camera stopped sending video' });
+      mgr2.sessions.set('d/sub', sessLive(true));
+      const onDvr = mgr2.list()[0].variants[0];
+      mgr2.sessions.set('d/sub', sessLive(false));
+      const onCam = mgr2.list()[0].variants[0];
+      check('dvr: the camera list says how each stream arrives', onDvr.delivery === 'dvr' && onDvr.dvrWanted && onDvr.dvrError === null
+        && onCam.delivery === 'unicast' && /stopped sending/.test(onCam.dvrError), JSON.stringify([onDvr, onCam]));
+    }
+
+    check('keepMulticast survives normaliseCamera',normaliseCamera({ id: 'k', name: 'K', sources: [{ url: 'rtsp://h/x', transport: 'multicast', keepMulticast: true }] }).sources[0].keepMulticast === true);
   } catch (err) {
     check('no exceptions', false, err.stack);
   } finally {

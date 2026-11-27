@@ -14,6 +14,20 @@ function fpsOf(r) {
 }
 
 async function probe(source, settings, opts = {}) {
+  // DVR first (sources.js): the recorder's relay is what will play, so that
+  // is what gets tested.  When it doesn't play, the camera's own answer is
+  // returned with `dvrError` set: the stream would still play (from the
+  // camera), but whoever saves the camera should hear that the DVR address is wrong.
+  if (source.dvrUrl) {
+    const d = await probeOnce(source, settings, { ...opts, dvr: true, timeoutMs: Math.min(opts.timeoutMs || 15000, 8000) });
+    if (d.ok) return { ...d, dvr: true };
+    const c = await probeCamera(source, settings, opts);
+    return { ...c, dvrError: d.error || 'The DVR address did not play' };
+  }
+  return probeCamera(source, settings, opts);
+}
+
+async function probeCamera(source, settings, opts = {}) {
   // Multicast first when it's wanted (and hasn't just failed for this stream),
   // with a short timeout: when it doesn't reach us, nothing arrives at all.
   if (wantsMulticast(source, settings) && multicastState(opts.key) !== 'failed') {
@@ -40,13 +54,13 @@ async function probeUnicast(source, settings, opts = {}) {
   return r;
 }
 
-async function probeOnce(source, settings, { timeoutMs = 15000, key, forceTcp = false, multicast } = {}) {
-  if (source.type === 'test' || /^(test|lavfi):/i.test(source.url)) {
+async function probeOnce(source, settings, { timeoutMs = 15000, key, forceTcp = false, multicast, dvr = false } = {}) {
+  if (!dvr && (source.type === 'test' || /^(test|lavfi):/i.test(source.url))) {
     const m = /(\d+)x(\d+)(?:@(\d+))?/.exec(source.url) || [];
     return { ok: true, videoCodec: 'h264', width: Number(m[1] || 1280), height: Number(m[2] || 720), fps: Number(m[3] || 25), audioCodec: 'pcm', hasAudio: true };
   }
   let input;
-  try { input = await inputArgs(source, settings, { key, lowLatency: false, forceTcp, multicast }); }
+  try { input = await inputArgs(source, settings, { key, lowLatency: false, forceTcp, multicast, dvr }); }
   catch (err) { return { ok: false, error: err.message }; }
   const args = [];
   for (let i = 0; i < input.args.length; i++) {
