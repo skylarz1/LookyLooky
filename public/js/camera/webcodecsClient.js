@@ -98,12 +98,26 @@ export function audioCapability() {
 /**
  * A desynchronized canvas skips the compositor to save about one display
  * frame, and in exchange may show the top of one frame over the bottom of
- * the last: tearing, worst on panning cameras.  Off by default; ?desync=1 on
- * the page's URL turns it back on to compare.
+ * the last: tearing, worst on panning cameras.  Video only; sound is not
+ * affected.  Off by default.  The server setting `webcodecs.lowDelayCanvas`
+ * (Settings → Streaming, delivered by /api/info) turns it on for every page;
+ * ?desync=1 or ?desync=0 on a page's URL overrides the setting for that page,
+ * to compare two windows side by side.
+ *
+ * A canvas keeps the mode of its first getContext() call, so a change only
+ * shows on canvases created afterwards: reload the page.
  */
-const DESYNC = (() => {
-  try { return new URLSearchParams(location.search).get('desync') === '1'; } catch { return false; }
+const DESYNC_OVERRIDE = (() => {
+  try {
+    const v = new URLSearchParams(location.search).get('desync');
+    return v === '1' ? true : v === '0' ? false : null;
+  } catch { return null; }
 })();
+
+/** The canvas mode to use, given the server setting: the page's ?desync= wins. */
+export function lowDelayCanvas(setting) {
+  return DESYNC_OVERRIDE ?? (setting === true);
+}
 
 /**
  * Draws VideoFrames to a plain <canvas> via a 2D context.  Resizes the
@@ -115,9 +129,15 @@ const DESYNC = (() => {
  * resources and leak fast if not released.
  */
 export class CanvasVideoRenderer {
-  constructor(canvas) {
+  /**
+   * @param {HTMLCanvasElement} canvas
+   * @param {object}  [opts]
+   * @param {boolean} [opts.lowDelay]  the server's lowDelayCanvas setting
+   */
+  constructor(canvas, { lowDelay = false } = {}) {
     this._canvas = canvas;
-    this._ctx = canvas.getContext('2d', { alpha: false, desynchronized: DESYNC });
+    this.lowDelay = lowDelayCanvas(lowDelay);
+    this._ctx = canvas.getContext('2d', { alpha: false, desynchronized: this.lowDelay });
     this._lastW = 0;
     this._lastH = 0;
   }
@@ -330,9 +350,10 @@ export class ThumbnailClient {
    * @param {string} opts.wsUrl
    * @param {string} opts.cameraId
    * @param {HTMLCanvasElement} opts.canvas
+   * @param {boolean} [opts.lowDelay]  the server's lowDelayCanvas setting
    * @param {(state:string, detail?:any)=>void} [opts.onStatus]
    */
-  constructor({ wsUrl, cameraId, canvas, onStatus, onFirstFrame } = {}) {
+  constructor({ wsUrl, cameraId, canvas, lowDelay = false, onStatus, onFirstFrame } = {}) {
     if (!wsUrl)    throw new Error('ThumbnailClient: wsUrl required');
     if (!cameraId) throw new Error('ThumbnailClient: cameraId required');
     if (!canvas)   throw new Error('ThumbnailClient: canvas required');
@@ -340,7 +361,9 @@ export class ThumbnailClient {
     this._wsUrl    = wsUrl;
     this._cameraId = cameraId;
     this._canvas   = canvas;
-    this._ctx      = canvas.getContext('2d', { alpha: false, desynchronized: DESYNC });
+    // Same mode as the full-motion renderer: a pane's canvases are shared by both tiers.
+    this.lowDelay  = lowDelayCanvas(lowDelay);
+    this._ctx      = canvas.getContext('2d', { alpha: false, desynchronized: this.lowDelay });
     this._onStatus = onStatus || (() => {});
     // Same contract as WebCodecsClient's: fires once, on the first painted
     // frame.  A camera whose MJPEG process isn't running yet takes an FFmpeg

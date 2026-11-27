@@ -45,6 +45,12 @@ const DEFAULT_SETTINGS = {
   },
   webcodecs: {
     bufferMs: 150,
+    // Draw video on a "desynchronized" canvas: it skips the browser's
+    // compositor, about one screen frame less delay, but the picture may tear
+    // on moving or panning cameras.  Video only; sound is not affected.
+    // Pages read it from /api/info when they load (?desync=1 / ?desync=0 on a
+    // page's URL overrides it for that page).
+    lowDelayCanvas: false,
     audioBitrate: '64k',
     audioChannels: 1,
     maxFullMotionPanes: 10,
@@ -241,6 +247,7 @@ function parseCamerasXml(text) {
         audioBitrate: a['audio-bitrate'] || undefined,
         audioChannels: num('audio-channels'),
         bufferMs: num('buffer-ms'),
+        lowDelayCanvas: a['low-delay-canvas'] !== undefined ? a['low-delay-canvas'] === 'true' : undefined,
         maxFullMotionPanes: num('max-full-motion'),
       }),
       mjpeg: clean({

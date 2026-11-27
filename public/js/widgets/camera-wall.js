@@ -343,6 +343,7 @@ export default class CameraWall extends Widget {
             const info = await this.Json("/api/info");
             if (typeof info?.webcodecs?.bufferMs === "number")
                 this.bufferMs = info.webcodecs.bufferMs;
+            this.lowDelayCanvas = info?.webcodecs?.lowDelayCanvas === true;
             this.qualityPolicy = info?.webcodecs?.qualityPolicy || "sub";
             this.mainMinWidth = info?.webcodecs?.mainMinWidth || 1280;
         } catch (err) { /* keep the default */ }
@@ -368,6 +369,7 @@ export default class CameraWall extends Widget {
             container: container,
             wsUrl: this.SocketUrl(),
             bufferMs: this.bufferMs,
+            lowDelayCanvas: this.lowDelayCanvas === true,
 
             // One. The main pane is the only one that decodes video; the six
             // previews are MJPEG thumbnails.

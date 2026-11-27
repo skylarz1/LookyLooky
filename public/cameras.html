@@ -1194,6 +1194,15 @@
             </select>
           </div>
         </div>
+        <label style="font-size:13px;display:flex;align-items:center;gap:5px;cursor:pointer;margin:4px 0 4px;"><input type="checkbox" id="setWcLowDelayCanvas" /> Low-delay video drawing</label>
+        <div id="setWcLowDelayCanvasHelp" style="font-size:11px;color:var(--text-dim);margin:0 0 14px;line-height:1.45;">
+          About one screen frame less video delay (roughly 16 ms on a 60 Hz screen).
+          The picture may tear (the top of one frame over the bottom of the last)
+          on moving or panning cameras. No effect on sound. Off by default.
+          Each screen picks the change up when its page is reloaded.
+          To compare two windows, add <code>?desync=1</code> or <code>?desync=0</code>
+          to a page's address: that overrides this setting for that page only.
+        </div>
         <div style="display:flex;gap:12px;margin-bottom:14px;">
           <div class="form-group" style="flex:1;margin:0;">
             <label>Audio Channels</label>
@@ -3562,6 +3571,7 @@
 
         // WebCodecs (primary transport)
         document.getElementById('setWcBufferMs').value       = s.webcodecs?.bufferMs ?? 150;
+        document.getElementById('setWcLowDelayCanvas').checked = s.webcodecs?.lowDelayCanvas === true;
         // Coerce any legacy free-text value to the nearest dropdown option; if
         // it's not one of the preset strings, fall back to the default.
         {
@@ -3742,6 +3752,7 @@
         webcodecs: {
           ...(base.webcodecs || {}),
           bufferMs:      parseInt(document.getElementById('setWcBufferMs').value)     || 150,
+          lowDelayCanvas: document.getElementById('setWcLowDelayCanvas').checked,
           audioBitrate:  document.getElementById('setWcAudioBitrate').value            || '64k',
           audioChannels: parseInt(document.getElementById('setWcAudioChannels').value) || 1,
           maxFullMotionPanes: Math.max(1, parseInt(document.getElementById('setWcMaxFullMotion').value) || 10),
@@ -3765,6 +3776,9 @@
         });
         hideSettingsModal();
         cameraGrid?.setQualityPolicy(settings.webcodecs.qualityPolicy, settings.webcodecs.mainMinWidth);
+        // Panes built from now on (the next layout switch) use the new canvas
+        // mode; the ones on screen keep theirs until the page reloads.
+        if (cameraGrid) cameraGrid.lowDelayCanvas = settings.webcodecs.lowDelayCanvas === true;
         alert(result.message || 'Settings saved.');
       } catch (err) {
         alert('Failed to save settings: ' + err.message);
@@ -4084,8 +4098,10 @@
       let initialBudget   = 10;
       let qualityPolicy   = 'sub';
       let mainMinWidth    = 1280;
+      let lowDelayCanvas  = false;
       try {
         const info = await fetchJSON('/api/info');
+        lowDelayCanvas = info?.webcodecs?.lowDelayCanvas === true;
         if (typeof info?.webcodecs?.bufferMs === 'number') initialBufferMs = info.webcodecs.bufferMs;
         if (typeof info?.webcodecs?.maxFullMotionPanes === 'number') initialBudget = info.webcodecs.maxFullMotionPanes;
         if (info?.webcodecs?.qualityPolicy) qualityPolicy = info.webcodecs.qualityPolicy;
@@ -4103,6 +4119,7 @@
         container:          document.getElementById('cameraGrid'),
         wsUrl:              streamSocketUrl(),
         bufferMs:           initialBufferMs,
+        lowDelayCanvas,
         maxFullMotionPanes: initialBudget,
         layoutDefs,
         fullMotion:         fullMotionAvailable,

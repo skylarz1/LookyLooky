@@ -191,9 +191,10 @@
 
       // Match the dashboard's playout buffer and decode budget so a pane
       // behaves the same on either page.
-      let bufferMs = 150, maxFullMotionPanes = 10, qualityPolicy = 'sub', mainMinWidth = 1280;
+      let bufferMs = 150, maxFullMotionPanes = 10, qualityPolicy = 'sub', mainMinWidth = 1280, lowDelayCanvas = false;
       try {
         const info = await fetchJSON('/api/info');
+        lowDelayCanvas = info?.webcodecs?.lowDelayCanvas === true;
         if (typeof info?.webcodecs?.bufferMs === 'number') bufferMs = info.webcodecs.bufferMs;
         if (typeof info?.webcodecs?.maxFullMotionPanes === 'number') {
           maxFullMotionPanes = info.webcodecs.maxFullMotionPanes;
@@ -204,7 +205,7 @@
 
       const container = document.getElementById('viewGrid');
       // interactive:false makes panes drag-inert and binds no pointer handlers.
-      const grid = new CameraGrid({ container, wsUrl: STREAM_URL, bufferMs, maxFullMotionPanes, interactive: false,
+      const grid = new CameraGrid({ container, wsUrl: STREAM_URL, bufferMs, lowDelayCanvas, maxFullMotionPanes, interactive: false,
                                     fullMotion: LookyCompat.webcodecs, qualityPolicy, mainMinWidth });
       // ?quality=high|low pins the whole board (a kiosk URL), like the dashboard's Quality menu.
       const qp = (new URLSearchParams(location.search).get('quality') || '').toLowerCase();
