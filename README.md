@@ -501,7 +501,7 @@ LOOKY_ADMIN_PASSWORD=... node tools/browserload.js --url https://looky.local --i
 
 | Method | Path | |
 |---|---|---|
-| GET | `/api/info`, `/api/stats`, `/api/health` | Server identity, buffer, decode budget and quality policy; live stats (`?viewers=1` adds every viewer, admin; `?history=1` the last 30 min) |
+| GET | `/api/info`, `/api/stats`, `/api/health` | Server identity, buffer, low-delay canvas setting, decode budget and quality policy; live stats (`?viewers=1` adds every viewer, admin; `?history=1` the last 30 min) |
 | GET | `/api/loss-history` | Packet loss per stream and minute, last 24 h: `rows: [{ t, s: { "<camera>/<stream>": [gaps, held frames, frames sent, freezes] } }]` |
 | GET / POST | `/api/cameras` | List (no credentials, with each watched camera's `problem`, see above); add. Each stream is tested first, and a failure returns 422 `STREAM_TEST_FAILED` with the reasons; send `force:true` to save anyway |
 | GET / PUT / DELETE | `/api/cameras/:id` | Full definition (admin) / edit / remove |

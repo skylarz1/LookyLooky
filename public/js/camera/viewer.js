@@ -248,8 +248,10 @@ export class CameraPane {
    * @param {string}  [opts.idPrefix]     — DOM ID prefix for multi-grid pages
    * @param {boolean} [opts.isFocalStream]
    * @param {number}  [opts.bufferMs]
+   * @param {boolean} [opts.lowDelayCanvas]  draw on a desynchronized canvas (see webcodecsClient.js)
    */
-  constructor({ cameraId, camera, slotIndex, wsUrl, idPrefix = '', isFocalStream = false, bufferMs = 150, mode = 'webcodecs', interactive = true }) {
+  constructor({ cameraId, camera, slotIndex, wsUrl, idPrefix = '', isFocalStream = false, bufferMs = 150, lowDelayCanvas = false, mode = 'webcodecs', interactive = true }) {
+    this._lowDelayCanvas = lowDelayCanvas === true;
     this.cameraId      = cameraId;
     // A non-interactive pane is drag-inert and binds no pointer handlers —
     // for read-only boards (view.html) where a stray drag is pure noise.
@@ -512,7 +514,7 @@ export class CameraPane {
 
     if (mode === 'thumbnail') {
       return new ThumbnailClient({
-        wsUrl: this._wsUrl, cameraId: this.cameraId, canvas, onStatus, onFirstFrame,
+        wsUrl: this._wsUrl, cameraId: this.cameraId, canvas, lowDelay: this._lowDelayCanvas, onStatus, onFirstFrame,
       });
     }
 
@@ -522,7 +524,7 @@ export class CameraPane {
       wsUrl:    this._wsUrl,
       cameraId: this.cameraId,
       quality,
-      renderer: new CanvasVideoRenderer(canvas),
+      renderer: new CanvasVideoRenderer(canvas, { lowDelay: this._lowDelayCanvas }),
       bufferMs: this._bufferMs,
       muted:    this.grid ? !this.grid.isPaneAudible(this.cameraId) : (isFocal ? (audio?.muted ?? false) : true),
       volume:   audio?.volume ?? 1,
@@ -1295,8 +1297,11 @@ export class CameraPane {
  * callbacks (hover HTML, empty slots, drag/drop, audio focus) to the host.
  */
 export class CameraGrid {
-  constructor({ container, wsUrl, idPrefix = '', bufferMs, layoutDefs, maxFullMotionPanes, interactive = true, fullMotion,
+  constructor({ container, wsUrl, idPrefix = '', bufferMs, lowDelayCanvas = false, layoutDefs, maxFullMotionPanes, interactive = true, fullMotion,
                 qualityPolicy, mainMinWidth } = {}) {
+    // The server's webcodecs.lowDelayCanvas (from /api/info, like bufferMs).
+    // Read when a pane is built: a canvas cannot change mode afterwards.
+    this.lowDelayCanvas = lowDelayCanvas === true;
     this.container  = container;
     // false → every pane is a JPEG thumbnail (no WebCodecs in this browser).
     this.fullMotion = fullMotion ?? webCodecsAvailable();
@@ -1970,6 +1975,7 @@ export class CameraGrid {
             idPrefix:      this.idPrefix,
             isFocalStream: this._audio.focal === cam.id,
             bufferMs:      this.bufferMs,
+            lowDelayCanvas: this.lowDelayCanvas,
             interactive:   this.interactive,
             mode:          this.fullMotion ? 'webcodecs' : 'thumbnail',
           });

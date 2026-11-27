@@ -57,7 +57,8 @@ public/styles/camera-viewer.css    full-page styles; camera-wall.css is the SAME
                                    change both together
 config/                   first-boot seed. Real cameras.xml / camera-layouts.xml contain camera passwords: git-ignored,
                           never commit them. Only *.example.xml are tracked.
-test/e2e.js               browser smoke test     test/features.js  multi-audio, zoom, quality, per-pane speakers
+test/e2e.js               browser smoke test     test/features.js  multi-audio, zoom, quality, per-pane speakers,
+                                                 network covers, low-delay canvas setting
 test/onvif.js             fake ONVIF camera: multicast discovery/lookup, keyframe requests, FFmpeg args, fallback memory
                           (no instance needed)
 test/network.js           unreachable cameras: the TCP knock, STREAM_PROBLEM, wait-then-restart; packet loss: held frames,

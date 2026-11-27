@@ -275,6 +275,86 @@ async function measureTones(p) {
   }
   await api('DELETE', '/api/layouts/neterr');
   for (const id of ['lost', 'shut']) await api('DELETE', `/api/cameras/${id}`);
+
+  // ── 11. Low-delay (desynchronized) canvas: a server setting, with ?desync=1 / ?desync=0 per page ──
+  // What is checked is the mode each pane ASKS the browser for.  Whether the
+  // screen then tears can only be judged by eye on a real display, and a
+  // browser may ignore the request (headless Chromium usually does): the
+  // "browser granted" value is printed, not asserted.
+  try {
+    // What every canvas on the page asked for and got: [{ asked, granted }]
+    const modes = (p) => p.evaluate(() => {
+      const grid = window.__claudiferGrid || window.__claudiferWall?.grid;
+      return [...grid._panes.values()].map((x) => {
+        const c = x._client; if (!c) return { asked: null };
+        const r = c._renderer || c;                       // full motion: its renderer; thumbnail: the client itself
+        return { asked: r.lowDelay, granted: r._ctx?.getContextAttributes?.().desynchronized };
+      });
+    });
+    const all = (m, want) => m.length > 0 && m.every((x) => x.asked === want);
+    const lowDelay = async () => (await api('GET', '/api/info')).webcodecs?.lowDelayCanvas;
+
+    await api('PUT', '/api/settings', { webcodecs: { lowDelayCanvas: false } });
+    check('low delay: off by default in /api/info', (await lowDelay()) === false);
+
+    // Dashboard with the setting off, then switch it on in the Settings dialog.
+    const d = await open('/cameras.html');
+    d.p.on('dialog', (dlg) => dlg.accept());                 // "Settings saved" alert
+    await d.p.selectOption('#layoutSelect', 'feat'); await d.p.waitForTimeout(4000);
+    const off = await modes(d.p);
+    check('low delay: setting off → panes draw in normal canvas mode', all(off, false), JSON.stringify(off));
+    await d.p.click('button[title="Settings"]'); await d.p.waitForTimeout(800);
+    await d.p.click('.stab[data-tab="streaming"]');
+    const help = (await d.p.textContent('#setWcLowDelayCanvasHelp')).replace(/\s+/g, ' ');
+    const box = await d.p.isChecked('#setWcLowDelayCanvas');
+    check('low delay: Settings shows the checkbox, unchecked, with its explanation',
+      box === false && /one screen frame less video delay/.test(help) && /may tear/.test(help) && /No effect on sound/.test(help) && /reloaded/.test(help) && /\?desync=1/.test(help) && /\?desync=0/.test(help), help);
+    await d.p.check('#setWcLowDelayCanvas');
+    await d.p.click('#settingsModal button:has-text("Save")'); await d.p.waitForTimeout(1500);
+    const saved = (await api('GET', '/api/settings')).webcodecs?.lowDelayCanvas;
+    check('low delay: Save stores it and /api/info reports it', saved === true && (await lowDelay()) === true, `settings ${saved}`);
+    check('low delay (dashboard): no page errors', d.errors.length === 0, d.errors.join(' | '));
+    await d.ctx.close();
+
+    // Pages loaded from now on use it: dashboard (dialog shows it checked), view page, wall.
+    const d2 = await open('/cameras.html');
+    await d2.p.selectOption('#layoutSelect', 'feat'); await d2.p.waitForTimeout(4000);
+    const on = await modes(d2.p);
+    await d2.p.click('button[title="Settings"]'); await d2.p.waitForTimeout(800);
+    const boxOn = await d2.p.isChecked('#setWcLowDelayCanvas');
+    check('low delay: setting on → after a reload the dashboard asks for the low-delay canvas', all(on, true) && boxOn === true, `${JSON.stringify(on)} checkbox ${boxOn}`);
+    console.log(`      (browser granted desynchronized: ${JSON.stringify(on.map((x) => x.granted))})`);
+    await d2.ctx.close();
+
+    const v = await open('/camera-view.html?layout=feat');
+    const view = await modes(v.p);
+    check('low delay: setting on → the view page asks for it too', all(view, true), JSON.stringify(view));
+    check('low delay (view): pictures still play, no page errors',
+      (await v.p.evaluate(() => [...window.__claudiferGrid._panes.values()].every((x) => x._client.getStats().framesRendered > 0))) && v.errors.length === 0, v.errors.join(' | '));
+    await v.ctx.close();
+
+    const w = await open('/wall.html?layout=feat', { viewport: { width: 1024, height: 768 } });
+    const wall = await modes(w.p);
+    check('low delay: setting on → the wall asks for it (main pane and thumbnails)', all(wall, true), JSON.stringify(wall));
+    await w.ctx.close();
+
+    // Per-page overrides, both ways.
+    const v0 = await open('/camera-view.html?layout=feat&desync=0');
+    const forcedOff = await modes(v0.p);
+    check('low delay: ?desync=0 turns it off for that page while the setting is on', all(forcedOff, false), JSON.stringify(forcedOff));
+    await v0.ctx.close();
+
+    await api('PUT', '/api/settings', { webcodecs: { lowDelayCanvas: false } });
+    const v1 = await open('/camera-view.html?layout=feat&desync=1');
+    const forcedOn = await modes(v1.p);
+    check('low delay: ?desync=1 turns it on for that page while the setting is off', all(forcedOn, true), JSON.stringify(forcedOn));
+    await v1.ctx.close();
+  } catch (err) {
+    check('low delay: test ran to the end', false, err.message);
+  } finally {
+    await api('PUT', '/api/settings', { webcodecs: { lowDelayCanvas: false } });   // leave the instance as found
+  }
+
   await browser.close();
   const failed = results.filter((x) => !x).length;
   console.log(`\n${results.length - failed}/${results.length} checks passed`);

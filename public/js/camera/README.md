@@ -27,6 +27,13 @@ browser).
 
 - **Playout:** decoded frames are scheduled against a clock anchored on the
   first chunk, with a `bufferMs` jitter buffer (default 150).
+- **Low-delay canvas:** the server setting `webcodecs.lowDelayCanvas`
+  (Settings → Streaming, default off) draws on a `desynchronized` canvas:
+  about one screen frame less video delay, but the picture may tear on moving
+  or panning cameras. Sound is not affected. Pages read it from `/api/info`
+  when they load and pass it to `CameraGrid` as `lowDelayCanvas`; `?desync=1`
+  or `?desync=0` on a page's URL overrides it for that page. A canvas keeps
+  its first mode, so a change shows after a reload.
 - **Live-edge join:** on subscribe, the server replays its cached GOP with
   `FLAG_CATCHUP`. Each such chunk re-anchors the clock, so playback starts at
   the newest frame.

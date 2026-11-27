@@ -35,6 +35,7 @@ function register(router, ctx) {
       mjpegEnabled: s.mjpeg.enabled !== false,
       webcodecs: {
         bufferMs: s.webcodecs.bufferMs, maxFullMotionPanes: s.webcodecs.maxFullMotionPanes,
+        lowDelayCanvas: s.webcodecs.lowDelayCanvas === true,
         audioBitrate: s.webcodecs.audioBitrate, audioChannels: s.webcodecs.audioChannels,
         qualityPolicy: s.webcodecs.qualityPolicy || 'sub', mainMinWidth: s.webcodecs.mainMinWidth || 1280,
       },
@@ -284,6 +285,11 @@ function register(router, ctx) {
   const getSettings = admin((req, res) => sendJson(res, 200, store.settings));
   const putSettings = admin(async (req, res) => {
     const body = await readJson(req);
+    // A checkbox setting: keep it a real boolean whatever the client sent.
+    if (body && body.webcodecs && body.webcodecs.lowDelayCanvas !== undefined) {
+      const v = body.webcodecs.lowDelayCanvas;
+      body.webcodecs.lowDelayCanvas = v === true || v === 'true' || v === 1;
+    }
     store.saveSettings(body);
     manager.applyKeepWarm();
     sendJson(res, 200, { ok: true, settings: store.settings, message: 'Settings saved. Changes apply as each stream next starts (Recycle Cameras applies them now).' });
