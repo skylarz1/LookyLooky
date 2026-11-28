@@ -177,10 +177,12 @@ class CameraManager {
             label: src.label, type: src.type,
             videoCodec: v.videoCodec || null, width: v.width || null, height: v.height || null,
             fps: v.fps || null, audioCodec: v.audioCodec || null, transcode: !!src.transcode,
-            // How the running stream arrives: 'dvr' (from the recorder) | 'multicast' | 'unicast'; null when not running.
-            delivery: live ? (sess.active.dvr ? 'dvr' : sess.active.multicast ? 'multicast' : 'unicast') : null,
+            // How the running stream arrives: 'relay' | 'dvr' (from the recorder) | 'multicast' | 'unicast'; null when not running.
+            delivery: live ? (sess.active.relay ? 'relay' : sess.active.dvr ? 'dvr' : sess.active.multicast ? 'multicast' : 'unicast') : null,
             // DVR first: the source has a recorder address; `dvrError` = why the camera is played instead right now.
-            dvrWanted: !!src.dvrUrl, dvrError: live && !sess.active.dvr ? (sess.dvrError || null) : null,
+            dvrWanted: !!src.dvrUrl, dvrError: live && !sess.active.dvr && !sess.active.relay ? (sess.dvrError || null) : null,
+            // Relay first: the source has a relay address; `relayError` = why a lower step is played instead right now.
+            relayWanted: !!src.relayUrl, relayError: live && !sess.active.relay ? (sess.relayError || null) : null,
           };
         }),
       };

@@ -78,8 +78,11 @@ function register(router, ctx) {
       if (r.ok) manager.updateVariant(cam.id, src.label, { ...r, probedAt: Date.now() });
       // A DVR address that doesn't play fails the test even when the camera
       // itself does: the stream would run, but never from the recorder.
-      if (r.dvrError) return { label: src.label, ok: false, error: `DVR address: ${r.dvrError}${r.ok ? ' (the camera itself plays)' : ''}`, note: r.note || null, multicast: false, dvr: false, width: r.width || null, height: r.height || null, videoCodec: r.videoCodec || null, audioCodec: r.audioCodec || null };
-      return { label: src.label, ok: r.ok, error: r.error || null, note: r.note || null, multicast: !!r.multicast, dvr: !!r.dvr, width: r.width || null, height: r.height || null, videoCodec: r.videoCodec || null, audioCodec: r.audioCodec || null };
+      // The same for a relay address (relay first, sources.js).
+      const below = r.ok ? (r.dvr ? ' (the DVR plays)' : ' (the camera itself plays)') : '';
+      if (r.relayError) return { label: src.label, ok: false, error: `Relay address: ${r.relayError}${below}`, note: r.note || null, multicast: false, dvr: false, relay: false, width: r.width || null, height: r.height || null, videoCodec: r.videoCodec || null, audioCodec: r.audioCodec || null };
+      if (r.dvrError) return { label: src.label, ok: false, error: `DVR address: ${r.dvrError}${r.ok ? ' (the camera itself plays)' : ''}`, note: r.note || null, multicast: false, dvr: false, relay: false, width: r.width || null, height: r.height || null, videoCodec: r.videoCodec || null, audioCodec: r.audioCodec || null };
+      return { label: src.label, ok: r.ok, error: r.error || null, note: r.note || null, multicast: !!r.multicast, dvr: !!r.dvr, relay: !!r.relay, width: r.width || null, height: r.height || null, videoCodec: r.videoCodec || null, audioCodec: r.audioCodec || null };
     }));
   }
 
@@ -170,7 +173,7 @@ function register(router, ctx) {
     const key = item.key || item.ip;
     const transport = ['udp', 'multicast'].includes(item.transport) ? item.transport : 'tcp';
     let sources = Array.isArray(item.sources) && item.sources.length
-      ? item.sources.map((s) => ({ label: s.label, url: s.url, transport: s.transport || transport, multicastUrl: s.multicastUrl, dvrUrl: s.dvrUrl })) : null;
+      ? item.sources.map((s) => ({ label: s.label, url: s.url, transport: s.transport || transport, multicastUrl: s.multicastUrl, dvrUrl: s.dvrUrl, relayUrl: s.relayUrl })) : null;
     let note = null;
     if (!sources && item.user) {
       emit('item', { key, stage: 'discovering' });
