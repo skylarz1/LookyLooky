@@ -5,7 +5,8 @@
  *
  *   rtsp://  the normal case — IP cameras, NVRs, UniFi Protect (rtsp://host:7447/…).
  *            Over TCP (default), UDP, or multicast (see "Multicast" below).
- *            Optionally from the camera's recorder first (see "DVR first" below).
+ *            Optionally from a relay, then the camera's recorder, before the
+ *            camera itself (see "DVR first" and "Relay first" below).
  *   http://  cameras that serve a live MP4/MJPEG over HTTP.  Includes the old
  *            camera-proxy's session-cookie login (Cortex / Hikvision-style
  *            "POST /login then send the cookie"), ported here so those cameras
@@ -183,6 +184,30 @@ function clearMulticastMemory(prefix = '') {
 
 const DVR_AUTH_RETRY_MS = 24 * 60 * 60 * 1000;
 
+/* --- Relay first --------------------------------------------------------- */
+/*
+ * A source may also carry a `relayUrl`: the same stream re-served by a relay
+ * on the server network (Watcha's go2rtc, rtsp://<relay>:8555/<name>).  The
+ * relay pulls the camera once for everyone, so playing from it costs the
+ * camera nothing.  Measured 2026-11-27: no audible delay against the camera
+ * (under 1 ms), where a recorder adds about 25 ms.
+ *
+ * The order is relay (relayUrl), then recorder (dvrUrl), then the camera
+ * (url).  A step that failed rests for a while and is skipped meanwhile; once
+ * its rest is over the stream climbs back to it make-before-break.  The relay
+ * differs from a recorder in one way: it restarts in about a second (a go2rtc
+ * update, a container restart), so its first failure is tried again after
+ * RELAY_GRACE_MS, instead of sending every stream in the building to the
+ * recorders and cameras at once.  A second failure within
+ * RELAY_GRACE_WINDOW_MS moves the stream down a step; the relay then rests
+ * settings.ffmpeg.relayRetryMs (1 min), doubling while it keeps failing, at
+ * most RELAY_MAX_REST_MS.  See StreamSession._relayFailed.
+ */
+
+const RELAY_GRACE_MS = 2000;
+const RELAY_GRACE_WINDOW_MS = 60 * 1000;
+const RELAY_MAX_REST_MS = 10 * 60 * 1000;
+
 /* --- URLs ---------------------------------------------------------------- */
 
 function buildUrl(source) {
@@ -211,9 +236,10 @@ function basicHeader(auth) {
  * FFmpeg input arguments for a source.
  * @param {object} source normalised source
  * @param {object} settings full settings
- * @param {object} opts { key, lowLatency=true, log, dvr: true = from the source's dvrUrl (see "DVR first") }
+ * @param {object} opts { key, lowLatency=true, log, dvr: true = from the source's dvrUrl (see "DVR first"),
+ *                       relay: true = from the source's relayUrl (see "Relay first"; wins over dvr) }
  */
-async function inputArgs(source, settings, { key = '', lowLatency = true, slowProbe = false, forceTcp = false, multicast, dvr = false, log } = {}) {
+async function inputArgs(source, settings, { key = '', lowLatency = true, slowProbe = false, forceTcp = false, multicast, dvr = false, relay = false, log } = {}) {
   const type = source.type || sourceType(source.url);
   // NOT +nobuffer: it discards the packets read while probing, and the first
   // of those is the keyframe — every start would then wait a whole extra GOP
@@ -226,6 +252,12 @@ async function inputArgs(source, settings, { key = '', lowLatency = true, slowPr
       '-probesize', slowProbe ? '5000000' : '500000', '-analyzeduration', slowProbe ? '5000000' : '500000']
     : ['-fflags', '+genpts+discardcorrupt'];
 
+  if (relay && source.relayUrl) {
+    return {
+      args: ['-rtsp_transport', 'tcp', '-timeout', '10000000', ...lat, '-i', source.relayUrl],
+      video: '0:v:0', audio: '0:a:0', relay: true,
+    };
+  }
   if (dvr && source.dvrUrl) {
     return {
       args: ['-rtsp_transport', 'tcp', '-timeout', '10000000', ...lat, '-i', source.dvrUrl],
@@ -312,5 +344,5 @@ function friendlyError(stderr) {
 module.exports = {
   inputArgs, buildUrl, redact, hostOf, friendlyError, login, getSession, clearSession, clearAllSessions,
   httpRequest, basicHeader, wantsMulticast, multicastState, noteMulticast, clearMulticastMemory, MULTICAST_RETRY_MS,
-  reachable, probeHost, DVR_AUTH_RETRY_MS,
+  reachable, probeHost, DVR_AUTH_RETRY_MS, RELAY_GRACE_MS, RELAY_GRACE_WINDOW_MS, RELAY_MAX_REST_MS,
 };

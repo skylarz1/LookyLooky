@@ -46,6 +46,10 @@ const DEFAULT_SETTINGS = {
     // the recorder fails, the camera is played directly and the recorder is
     // tried again this often.
     dvrRetryMs: 300000,
+    // A source with a relayUrl plays from the relay before the recorder and
+    // the camera (sources.js "Relay first").  After the relay fails twice in a
+    // minute it is tried again this often (doubling, at most 10 min).
+    relayRetryMs: 60000,
   },
   webcodecs: {
     bufferMs: 150,
@@ -166,6 +170,10 @@ function normaliseSource(s, fallbackLabel) {
   // The same stream as the camera's recorder (DVR/NVR) relays it: played first,
   // with `url` as the fallback when the recorder fails (sources.js "DVR first").
   if (s.dvrUrl && /^rtsps?:\/\//i.test(String(s.dvrUrl).trim()) && String(s.dvrUrl).trim() !== out.url) out.dvrUrl = String(s.dvrUrl).trim();
+  // The same stream re-served by a relay (go2rtc): played before the recorder
+  // and the camera (sources.js "Relay first").
+  const relayUrl = String(s.relayUrl || '').trim();
+  if (/^rtsps?:\/\//i.test(relayUrl) && relayUrl !== out.url && relayUrl !== out.dvrUrl) out.relayUrl = relayUrl;
   if (out.type !== sourceType(out.url) && !['rtsp', 'http', 'rtmp', 'test', 'file'].includes(out.type)) out.type = sourceType(out.url);
   if (s.transcode) out.transcode = true;
   if (s.params && typeof s.params === 'object') out.params = { ...s.params };
@@ -275,7 +283,7 @@ function parseCamerasXml(text) {
     let s;
     while ((s = srcRe.exec(m[3] || ''))) {
       const sa = xmlAttrs(s[1]);
-      if (sa.url) sources.push({ label: sa.label || (sources.length ? 'sub' : 'main'), url: sa.url, transport: sa.transport, type: sa.type, multicastUrl: sa['multicast-url'], dvrUrl: sa['dvr-url'] });
+      if (sa.url) sources.push({ label: sa.label || (sources.length ? 'sub' : 'main'), url: sa.url, transport: sa.transport, type: sa.type, multicastUrl: sa['multicast-url'], dvrUrl: sa['dvr-url'], relayUrl: sa['relay-url'] });
     }
     if (!sources.length && a.source) sources.push({ label: 'main', url: a.source });
     const id = slugify(a['camera-id'] || a.id || a.name);

@@ -172,7 +172,9 @@
       document.getElementById('streams').innerHTML = head + rows.map((x) => `<tr>
         <td title="${esc(x.cameraId)}">${esc(names[x.cameraId] || x.cameraId)}</td><td class="l">${esc(x.variant)}</td>
         <td class="l ${x.state === 'live' ? 'ok' : x.state === 'failed' ? 'bad' : 'warn'}" title="${esc(x.lastError || '')}">${esc(x.state)}</td>
-        <td class="l">${x.dvr ? 'DVR' : x.state === 'live' && x.dvrWanted
+        <td class="l">${x.relay ? 'relay' : x.state === 'live' && x.relayWanted
+          ? `<span class="warn" title="${esc(x.relayError || 'The relay is not playing')} — playing ${x.dvr ? 'the DVR' : 'the camera directly'}; the relay is tried again by itself">${x.dvr ? 'DVR' : 'camera'}, not relay</span>`
+          : x.dvr ? 'DVR' : x.state === 'live' && x.dvrWanted
           ? `<span class="warn" title="${esc(x.dvrError || 'The DVR is not playing')} — playing the camera directly; the DVR is tried again by itself">camera, not DVR</span>`
           : x.multicast ? 'multicast' : x.state !== 'live' ? '' : x.multicastWanted
           ? `<span class="warn">unicast</span> <button class="btn retry" data-cam="${esc(x.cameraId)}" data-variant="${esc(x.variant)}" title="Try multicast again">Retry</button>`

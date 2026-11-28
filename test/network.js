@@ -338,6 +338,151 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         && onCam.delivery === 'unicast' && /stopped sending/.test(onCam.dvrError), JSON.stringify([onDvr, onCam]));
     }
 
+    // --- Relay first: relay, then the DVR, then the camera ---------------------
+    const relayCam = (dvr = true) => ({ id: 'r', name: 'R', enabled: true, sources: [{ label: 'sub', type: 'rtsp', url: 'rtsp://192.0.2.9/cam', transport: 'tcp',
+      ...(dvr ? { dvrUrl: 'rtsp://192.0.2.8/dvr?channel=1' } : {}), relayUrl: 'rtsp://192.0.2.7:8555/cam_sub' }] });
+    {
+      const nr = normaliseCamera({ id: 'nr', name: 'N', sources: [
+        { label: 'main', url: 'rtsp://h/x', relayUrl: ' rtsp://relay:8555/x ' },
+        { label: 'sub', url: 'rtsp://h/y', dvrUrl: 'rtsp://dvr/2', relayUrl: 'rtsp://dvr/2' },
+        { label: 'third', url: 'rtsp://h/z', relayUrl: 'http://relay/z' }] });
+      check('relay: relayUrl survives normaliseCamera, trimmed; one equal to the DVR address or not RTSP is dropped',
+        nr.sources[0].relayUrl === 'rtsp://relay:8555/x' && nr.sources[1].relayUrl === undefined && nr.sources[2].relayUrl === undefined, JSON.stringify(nr.sources));
+      const viaRelay = await sources.inputArgs(relayCam().sources[0], settings, { relay: true, dvr: true });
+      check('relay: input is the relay address over TCP, and wins over the DVR when both are asked for',
+        viaRelay.relay === true && !viaRelay.dvr && viaRelay.args.includes('rtsp://192.0.2.7:8555/cam_sub') && viaRelay.args[viaRelay.args.indexOf('-rtsp_transport') + 1] === 'tcp',
+        JSON.stringify(viaRelay.args));
+      const noRelay = await sources.inputArgs(dvrCam().sources[0], settings, { relay: true, dvr: true });
+      check('relay: a source without a relayUrl ignores the request (the DVR plays)', !noRelay.relay && noRelay.dvr === true);
+    }
+    const relaySession = (keepWarm = true, dvr = true) => {
+      const c = relayCam(dvr);
+      const m = new StreamSession({ ...fake, camera: () => c, keepWarm: () => keepWarm }, 'r', 'sub');
+      clearInterval(m.watchdog);
+      const logs2 = []; m.log = (x) => logs2.push(x);
+      const calls = { spawn: 0, recycle: 0 };
+      m._spawn = () => { calls.spawn++; }; m._recycle = () => { calls.recycle++; };
+      return { m, calls, logs: logs2 };
+    };
+    {
+      const { m, calls, logs: rl } = relaySession();
+      const first = m._wantedVia();
+      const sent = [];
+      m.clients.add({ configSent: true, send: (b) => sent.push(b[1]) });
+      // The relay restarts under a playing stream: one quick retry, nothing moves down.
+      const p = { relay: true }; m.active = p; m.state = 'live'; m.liveSince = Date.now() - 5000; m.lastVideoAt = Date.now();
+      m._onExit(p, 1, null, 'Connection refused');
+      const graced = { spawn: calls.spawn, state: m.state, via: m._wantedVia(), graces: m.stats.relayGraces, fallbacks: m.stats.relayFallbacks };
+      check('relay: wanted first; its first failure waits 2 s and tries the relay again, nothing falls back',
+        first === 'relay' && graced.spawn === 0 && graced.state === 'backoff' && graced.via === 'relay' && graced.graces === 1 && graced.fallbacks === 0
+        && sent.includes(0x06) && rl.some((l) => /trying the relay again in 2 s/.test(l)), JSON.stringify(graced));
+      await sleep(2200);
+      check('relay: ... and 2 s later the stream starts again (from the relay), not counted as a restart',
+        calls.spawn === 1 && m.restarts.length === 0 && m.stats.restarts === 0, JSON.stringify({ calls, restarts: m.restarts.length }));
+      // It fails again within the minute: down to the DVR, at once.
+      const p2 = { relay: true }; m.active = p2; m.state = 'starting';
+      m._onExit(p2, 1, null, 'Connection refused');
+      const rest = m.noRelayUntil - Date.now();
+      check('relay: a second failure within a minute plays the DVR at once; the relay rests 1 min',
+        calls.spawn === 2 && m._wantedVia() === 'dvr' && rest > 59000 && rest <= 60000 && m.stats.relayFallbacks === 1
+        && rl.some((l) => /^relay: The relay refused the connection.*playing the DVR; the relay is tried again in 1 min/.test(l)),
+        JSON.stringify({ calls, via: m._wantedVia(), rest, last: rl[rl.length - 1] }));
+      check('relay: info() says it is not on the relay and why', m.info().relayWanted === true && m.info().relay === false && /refused/.test(m.info().relayError), JSON.stringify(m.info().relayError));
+      // Then the DVR fails too: the camera.
+      const d = { dvr: true }; m.active = d; m.state = 'live'; m.liveSince = Date.now() - 1000; m.lastVideoAt = Date.now();
+      m._onExit(d, 1, null, 'The camera stopped sending video');
+      check('relay: with the relay and the DVR both resting, the camera plays', calls.spawn === 3 && m._wantedVia() === 'camera');
+      // On the camera.  Nothing happens while both rest; the DVR's rest ends first (relay still resting): back to the DVR.
+      const cam3 = { exited: false, startedAt: Date.now() }; m.active = cam3; m.state = 'live'; m.lastVideoAt = Date.now();
+      m._watchdog(); const early = calls.recycle;
+      m.noDvrUntil = Date.now() - 1; m.lastVideoAt = Date.now(); m._watchdog();
+      const toDvr = calls.recycle;
+      // On the DVR now; the relay's rest ends: back to the relay.
+      const dvr3 = { dvr: true, exited: false, startedAt: Date.now() }; m.active = dvr3; m.lastVideoAt = Date.now();
+      m._watchdog(); const stillDvr = calls.recycle;
+      m.noRelayUntil = Date.now() - 1; m.lastVideoAt = Date.now(); m._watchdog();
+      check('relay: climbs back one step at a time as each rest ends (camera → DVR → relay), make-before-break',
+        early === 0 && toDvr === 1 && stillDvr === 1 && calls.recycle === 2 && rl.some((l) => /trying the DVR again/.test(l)) && rl.some((l) => /trying the relay again/.test(l)),
+        JSON.stringify({ early, toDvr, stillDvr, recycle: calls.recycle }));
+      // That background try fails: the DVR keeps playing, the relay rests longer (2 min after the second failure).
+      const back = { relay: true }; m.pending = back;
+      m._onExit(back, 1, null, 'Operation timed out');
+      const second = m.noRelayUntil - Date.now();
+      for (let i = 0; i < 6; i++) m._relayFailed('Connection refused');
+      const capped = m.noRelayUntil - Date.now();
+      check('relay: a failed background try leaves the stream alone; an unstable relay rests longer (2 min), at most 10 min',
+        m.pending === null && m.active === dvr3 && calls.spawn === 3 && second > 119000 && second <= 120000 && capped > 599000 && capped <= 600000,
+        `${second} ms, then ${capped} ms`);
+      // A stream that plays from the relay after a background try is back on it.
+      m.noRelayUntil = 0; m.relayError = 'x';
+      const hev = { relay: true, needsRestart: true }; m.pending = hev; const fb = m.stats.relayFallbacks;
+      m._onExit(hev, 0, null, '');
+      check('relay: a background try restarting for H.265 parameter sets is not held against the relay', m._useRelay() && m.stats.relayFallbacks === fb);
+    }
+    {
+      const { m, calls, logs: nl } = relaySession(true, false);
+      const p = { relay: true }; m.active = p; m.state = 'starting';
+      m.relayGraceAt = Date.now();   // the quick retry was just used
+      m._onExit(p, 1, null, 'Connection refused');
+      check('relay: without a DVR address the camera is next', calls.spawn === 1 && m._wantedVia() === 'camera'
+        && nl.some((l) => /^relay: .*playing the camera directly/.test(l)), nl.join(' | '));
+    }
+    {
+      const { m, calls } = relaySession();
+      const p = { relay: true }; m.active = p; m.state = 'starting';
+      m._onExit(p, 1, null, 'method DESCRIBE failed: 401 Unauthorized');
+      const hours = (m.noRelayUntil - Date.now()) / 3600000;
+      check('relay: a rejected login gets no quick retry and rests 24 h', calls.spawn === 1 && m.stats.relayGraces === 0 && hours > 23.9 && hours <= 24, `${hours.toFixed(2)} h`);
+      check('relay: the reason names the relay, not the camera', m.relayError === 'The relay rejected the username or password', m.relayError);
+      m._relayFailed('rtsp://admin:secret@192.0.2.7:8555/x: Server returned 5XX Server Error reply');
+      check('relay: a password in the reason is masked', !/secret/.test(m.relayError) && /admin:\*\*\*@192\.0\.2\.7/.test(m.relayError), m.relayError);
+      const q = { relay: true }; m.active = q; m.state = 'live'; m.relayGraceAt = Date.now(); m.noRelayUntil = 0;
+      m._onExit(q, 1, null, 'frame=  100 fps= 15\n    Last message repeated 1 times\n');
+      check('relay: a closed stream gives a plain reason', m.relayError === 'The relay closed the stream', m.relayError);
+    }
+    {
+      const { m, calls } = relaySession(false);
+      const p = { relay: true }; m.active = p; m.state = 'starting';
+      m._onExit(p, 1, null, 'Connection refused');
+      await sleep(2200);
+      check('relay: with nobody watching, a relay failure starts nothing, now or 2 s later', calls.spawn === 0 && m.state === 'idle');
+    }
+    {
+      // A relay that never answers at start-up is left after 10 s, like a recorder.
+      const { m } = relaySession();
+      let kills = 0;
+      const p = { relay: true, exited: false, startedAt: Date.now(), stderrTail: '', kill() { kills++; } };
+      m.active = p; m.state = 'starting'; m._startedAt = Date.now() - 10500;
+      m._watchdog();
+      check('relay: no picture within 10 s from the relay → it is given up', kills === 1 && /timed out/.test(p.stderrTail));
+    }
+    {
+      // The real thing, FFmpeg stood in for by node (exits at once): relay, relay again 2 s later, DVR, camera.
+      answer = 'ok';
+      const c = relayCam(); const dl = [];
+      const m = new StreamSession({ ...fake, camera: () => c }, 'r', 'sub');
+      m.log = (msg) => dl.push(msg);
+      m.addClient({ configSent: false, send() {}, sendConfig() {}, detach() {} });
+      await sleep(3500);
+      const spawns = dl.filter((l) => l.startsWith('spawn'));
+      check('relay: a stream starts from the relay, tries it once more, then the DVR, then the camera',
+        /192\.0\.2\.7:8555.*\(relay\)/.test(spawns[0] || '') && /\(relay\)/.test(spawns[1] || '') && /192\.0\.2\.8\/dvr.*\(DVR\)/.test(spawns[2] || '')
+        && /192\.0\.2\.9\/cam/.test(spawns[3] || '') && !/\((relay|DVR)\)/.test(spawns[3] || ''), spawns.slice(0, 5).join(' | '));
+      m.destroy();
+    }
+    {
+      const { CameraManager: CM } = require('../server/cameras');
+      const mgr3 = new CM({ settings: DEFAULT_SETTINGS, cameras: [relayCam()] });
+      const live = (active, relayError) => ({ active: { multicast: false, ...active }, state: 'live', relayError, dvrError: null });
+      mgr3.sessions.set('r/sub', live({ relay: true }, null));
+      const onRelay = mgr3.list()[0].variants[0];
+      mgr3.sessions.set('r/sub', live({ dvr: true }, 'The relay refused the connection'));
+      const onDvr = mgr3.list()[0].variants[0];
+      check('relay: the camera list says how each stream arrives, and why it is not on the relay',
+        onRelay.delivery === 'relay' && onRelay.relayWanted && onRelay.relayError === null && onRelay.dvrError === null
+        && onDvr.delivery === 'dvr' && /refused/.test(onDvr.relayError), JSON.stringify([onRelay, onDvr]));
+    }
+
     check('keepMulticast survives normaliseCamera',normaliseCamera({ id: 'k', name: 'K', sources: [{ url: 'rtsp://h/x', transport: 'multicast', keepMulticast: true }] }).sources[0].keepMulticast === true);
   } catch (err) {
     check('no exceptions', false, err.stack);

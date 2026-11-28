@@ -288,6 +288,40 @@ camera. That takes load off cameras that struggle with several viewers.
 
 Recordings and ONVIF keyframe requests still go to the camera itself.
 
+### Relay first (relay → DVR → camera)
+
+A relay such as go2rtc pulls each camera once and re-serves it to everyone
+who asks (Watcha's go2rtc does this at `rtsp://<relay>:8555/<name>`). Give a
+stream a **relay address** (camera dialog → *Relay addresses*) and LookyLooky
+plays it from the relay first, then from the DVR address, then from the
+camera's own URL.
+
+- **Cost:** measured on 2026-11-27 against the same cameras pulled directly:
+  no audible delay (sound within 1 ms), the same frames and frame rate, and
+  the same FFmpeg CPU. Reading the relay opens no connection to the camera.
+- **A relay restart** is over in about a second, so the relay's first failure
+  is tried again after 2 s instead of moving every stream in the building to
+  the recorders and cameras at once. Measured before this change: a restart
+  cost 5.5 s of picture; with the quick retry it should be about 2 to 3 s
+  (not yet measured).
+- **If the relay fails again** within a minute (or right away when it
+  rejected the login): the stream plays from the DVR address, or the camera
+  if there is none or the DVR is resting too. Viewers see a short gap, not an
+  error. A relay that is up but whose own feed has stopped is left after
+  about 10 s, like a frozen recorder.
+- **Going back:** after 1 minute (`ffmpeg.relayRetryMs`) the relay is tried
+  again in the background and takes over without a gap once it shows a
+  picture; a relay that keeps failing waits longer each time (2, 4, 8
+  minutes, at most 10). While the relay rests, a stream on the camera still
+  climbs back to the DVR when the DVR's own rest is over.
+- **Saving:** a relay address that does not play fails the stream test, even
+  when the DVR or camera plays; *Save anyway* keeps it.
+- **Where it shows:** the Statistics page lists each stream as *relay*, or
+  *DVR, not relay* / *camera, not relay* (hover for the reason);
+  `/api/stats` has `relay`, `relayWanted`, `relayError`, `relayFallbacks`
+  and `relayGraces` (the quick retries) per stream.
+- **API / cameras.xml:** `relayUrl` per source; `relay-url="rtsp://…"` in the XML.
+
 ### Multicast
 
 With RTSP multicast, a camera sends each stream **once** onto the network,

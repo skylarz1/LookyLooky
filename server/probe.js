@@ -14,6 +14,19 @@ function fpsOf(r) {
 }
 
 async function probe(source, settings, opts = {}) {
+  // Relay first (sources.js): the relay is what will play, so it is tested
+  // first.  When it doesn't play, the next step's answer (recorder, or camera)
+  // comes back with `relayError` set, for whoever saves the camera.
+  if (source.relayUrl) {
+    const r = await probeOnce(source, settings, { ...opts, relay: true, timeoutMs: Math.min(opts.timeoutMs || 15000, 8000) });
+    if (r.ok) return { ...r, relay: true };
+    const next = await probeBelowRelay(source, settings, opts);
+    return { ...next, relayError: r.error || 'The relay address did not play' };
+  }
+  return probeBelowRelay(source, settings, opts);
+}
+
+async function probeBelowRelay(source, settings, opts = {}) {
   // DVR first (sources.js): the recorder's relay is what will play, so that
   // is what gets tested.  When it doesn't play, the camera's own answer is
   // returned with `dvrError` set: the stream would still play (from the
@@ -54,13 +67,13 @@ async function probeUnicast(source, settings, opts = {}) {
   return r;
 }
 
-async function probeOnce(source, settings, { timeoutMs = 15000, key, forceTcp = false, multicast, dvr = false } = {}) {
-  if (!dvr && (source.type === 'test' || /^(test|lavfi):/i.test(source.url))) {
+async function probeOnce(source, settings, { timeoutMs = 15000, key, forceTcp = false, multicast, dvr = false, relay = false } = {}) {
+  if (!dvr && !relay && (source.type === 'test' || /^(test|lavfi):/i.test(source.url))) {
     const m = /(\d+)x(\d+)(?:@(\d+))?/.exec(source.url) || [];
     return { ok: true, videoCodec: 'h264', width: Number(m[1] || 1280), height: Number(m[2] || 720), fps: Number(m[3] || 25), audioCodec: 'pcm', hasAudio: true };
   }
   let input;
-  try { input = await inputArgs(source, settings, { key, lowLatency: false, forceTcp, multicast, dvr }); }
+  try { input = await inputArgs(source, settings, { key, lowLatency: false, forceTcp, multicast, dvr, relay }); }
   catch (err) { return { ok: false, error: err.message }; }
   const args = [];
   for (let i = 0; i < input.args.length; i++) {
